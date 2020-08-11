@@ -15,13 +15,14 @@ extern crate log;
 use alloc::sync::Arc;
 
 use hashbrown::HashMap;
-use spin::RwLock;
+use spin::{RwLock, Mutex};
 
 use crate::structs::{USBBus, USBDevice};
 use crate::traits::{USBHostController, USBPipe};
 use crate::items::{EndpointType, ControlCommand, RequestType, TransferBuffer, TypeTriple, TransferDirection, Recipient, Error};
-use crate::consts::{REQUEST_GET_DESCRIPTOR, DESCRIPTOR_TYPE_DEVICE};
+use crate::consts::{REQUEST_GET_DESCRIPTOR, DESCRIPTOR_TYPE_DEVICE, USBSpeed};
 use crate::descriptor::USBDeviceDescriptor;
+use crate::error::USBError;
 
 #[macro_use]
 pub mod macros;
@@ -31,6 +32,7 @@ pub mod descriptor;
 pub mod items;
 pub mod structs;
 pub mod traits;
+pub mod error;
 
 fn as_mut_slice<T>(t: &mut T) -> &mut [u8] {
     unsafe { core::slice::from_raw_parts_mut(t as *mut T as *mut u8, core::mem::size_of::<T>()) }
@@ -39,7 +41,6 @@ fn as_mut_slice<T>(t: &mut T) -> &mut [u8] {
 fn as_slice<T>(t: &T) -> &[u8] {
     unsafe { core::slice::from_raw_parts(t as *const T as *const u8, core::mem::size_of::<T>()) }
 }
-
 
 
 pub struct USBHost {
@@ -70,6 +71,34 @@ impl USBHost {
         device
     }
 
+    /// Called when a new device is put into powered state but not yet addressed.
+    /// This function will get the initial descriptor, set address, get full descriptor and attach
+    /// a driver (if applicable)
+    pub fn new_device(&mut self, parent: Option<Arc<RwLock<USBDevice>>>, bus: Arc<RwLock<USBBus>>,
+                      depth: u8, speed: USBSpeed, port: u32) -> Result<Arc<RwLock<USBDevice>>, USBError> {
+        // Calculate initial MPS
+        let max_packet_size = match speed {
+            USBSpeed::Low => 8u16,
+            USBSpeed::Full |
+            USBSpeed::High => 64u16,
+            USBSpeed::Super => 512u16,
+            _ => return Err(USBError::InvalidArgument),
+        };
+
+        // this should be held until the device is added or failed
+        let mut bus_guard = bus.write();
+
+
+        let addr = match bus_guard.get_new_addr() {
+            Some(i) => i,
+            None => return Err(USBError::NoFreeDeviceAddress)
+        };
+        let mut dev = USBDevice::new(bus.clone(), addr);
+
+        // TODO: Temp
+        Err(USBError::InvalidArgument)
+    }
+
     fn fetch_descriptor<T>(device: &Arc<RwLock<USBDevice>>, req_type: RequestType, desc_type: u8, desc_index: u8, w_index: u16, buf: &mut T) {
         let control_endpoint = USBPipe { index: 0, endpoint_type: EndpointType::Control };
         let dev_lock = device.read();
@@ -92,25 +121,21 @@ impl USBHost {
         Self::fetch_descriptor(&device, RequestType::Standard, DESCRIPTOR_TYPE_DEVICE, 0, 0, &mut device_desc);
 
         info!("got device descriptor: {:?}", device_desc);
-
     }
 
     fn reset_port(&mut self, device: &Arc<RwLock<USBDevice>>) -> Result<(), Error> {
 
-                // self.set_feature(parent.slot_id, port.port_id, FEATURE_PORT_RESET)?;
-                //
-                // self.wait_until("failed to reset port", PORT_RESET_TIMEOUT, |this| {
-                //     if let Ok(status) = this.fetch_port_status(parent.slot_id, port.port_id) {
-                //         status.get_change_reset()
-                //     } else {
-                //         false
-                //     }
-                // })?;
-                //
-                // self.clear_feature(parent.slot_id, port.port_id, FEATURE_C_PORT_RESET)?;
-
-
-
+        // self.set_feature(parent.slot_id, port.port_id, FEATURE_PORT_RESET)?;
+        //
+        // self.wait_until("failed to reset port", PORT_RESET_TIMEOUT, |this| {
+        //     if let Ok(status) = this.fetch_port_status(parent.slot_id, port.port_id) {
+        //         status.get_change_reset()
+        //     } else {
+        //         false
+        //     }
+        // })?;
+        //
+        // self.clear_feature(parent.slot_id, port.port_id, FEATURE_C_PORT_RESET)?;
+        Ok(())
     }
-
 }

@@ -269,3 +269,23 @@ pub const FEATURE_C_PORT_OVER_CURRENT: u8 = 0x13;
 pub const FEATURE_C_PORT_RESET: u8 = 0x14;
 pub const FEATURE_PORT_TEST: u8 = 0x15;
 pub const FEATURE_PORT_INDICATOR: u8 = 0x16;
+
+#[repr(u8)]
+pub enum USBSpeed {
+    Invalid = 0,
+    Low = 1,
+    Full,
+    High,
+    Super,
+    LastValue,
+}
+
+impl USBSpeed {
+    pub fn from_raw(speed: u8) -> USBSpeed {
+        if speed > USBSpeed::Invalid as u8 && speed < USBSpeed::LastValue as u8 {
+            unsafe { core::mem::transmute(speed) }
+        } else {
+            USBSpeed::Invalid
+        }
+    }
+}

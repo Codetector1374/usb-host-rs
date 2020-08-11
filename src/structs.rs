@@ -3,17 +3,19 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 
-use spin::RwLock;
+use spin::{RwLock, Mutex};
 
 use crate::traits::{USBHostController, USBMeta, USBPipe};
 use crate::descriptor::USBDeviceDescriptor;
 use hashbrown::HashMap;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Describes a Generic USB Device
 pub struct USBDevice {
-    pub controller: Arc<dyn USBHostController>,
-    pub desc: Option<USBDeviceDescriptor>,
+    pub bus: Arc<RwLock<USBBus>>,
+    pub addr: u32,
 
+    pub desc: Option<USBDeviceDescriptor>,
     pub speed: u8,
     pub max_packet_size: u16,
 
@@ -21,9 +23,10 @@ pub struct USBDevice {
 }
 
 impl USBDevice {
-    pub fn new(controller: Arc<dyn USBHostController>) -> Self {
+    pub fn new(bus: Arc<RwLock<USBBus>>, addr: u32) -> Self {
         Self {
-            controller,
+            bus,
+            addr,
             desc: None,
             prv: None,
             speed: 0,
@@ -32,4 +35,18 @@ impl USBDevice {
     }
 }
 
-pub struct USBBus {}
+pub struct USBBus {
+    pub controller: Arc<dyn USBHostController>,
+    pub devices: Vec<Option<Arc<Mutex<USBDevice>>>>,
+}
+
+impl USBBus {
+    pub fn get_new_addr(&self) -> Option<u32> {
+        for i in 0..self.devices.len() {
+            if self.devices[i].is_none() {
+                return Some(i as u32);
+            }
+        }
+        return None
+    }
+}
