@@ -8,15 +8,23 @@
 #[macro_use]
 extern crate alloc;
 #[macro_use]
+extern crate downcast_rs;
+#[macro_use]
 extern crate log;
 
-use std::sync::{Arc, RwLock};
+use alloc::sync::Arc;
 
 use hashbrown::HashMap;
+use spin::RwLock;
 
 use crate::structs::{USBBus, USBDevice};
 use crate::traits::USBHostController;
 
+#[macro_use]
+pub mod macros;
+
+pub mod descriptor;
+pub mod items;
 pub mod structs;
 pub mod traits;
 
@@ -27,12 +35,8 @@ pub struct USBHost {
 
 
 impl USBHost {
-    pub fn attach_root_hub(&mut self, controller: Arc<dyn USBHostController>) {
-
-    }
+    pub fn attach_root_hub(&mut self, controller: Arc<dyn USBHostController>) {}
 
     pub fn new_device(&mut self, parent: Arc<USBDevice>, bus: Arc<USBBus>,
-                      depth: u32, speed: u32, port: u8) {
-
-    }
+                      depth: u32, speed: u32, port: u8) {}
 }

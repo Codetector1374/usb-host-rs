@@ -1,15 +1,31 @@
 //! USB Host Device Structures
 
-use std::sync::Arc;
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+
 use spin::RwLock;
-use crate::traits::USBHostController;
+
+use crate::traits::{USBHostController, USBMeta};
+use crate::descriptor::USBDeviceDescriptor;
 
 /// Describes a Generic USB Device
 pub struct USBDevice {
-    controller: Arc<RwLock<dyn USBHostController>>
+    pub controller: Arc<dyn USBHostController>,
+    pub desc: USBDeviceDescriptor,
 
+    pub speed: u8,
+    pub max_packet_size: u16,
+
+    pub prv: Option<Box<dyn USBMeta>>,
 }
 
-pub struct USBBus {
-
+impl USBDevice {
+    pub fn new(controller: Arc<dyn USBHostController>) -> Self {
+        Self {
+            controller,
+            prv: None,
+        }
+    }
 }
+
+pub struct USBBus {}
