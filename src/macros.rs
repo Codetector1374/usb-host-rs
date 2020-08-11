@@ -6,3 +6,16 @@ macro_rules! const_assert_size {
     };
 }
 
+#[macro_export]
+macro_rules! request_type {
+    ($dir:ident, $typ:ident, $rec:ident) => {
+        $crate::items::TypeTriple($crate::items::TransferDirection::$dir, $crate::items::RequestType::$typ, $crate::items::Recipient::$rec)
+    };
+}
+
+#[macro_export]
+macro_rules! request_type_u8 {
+    ($dir:ident, $typ:ident, $rec:ident) => {{
+        $crate::items::TypeTriple($crate::items::TransferDirection::$dir, $crate::items::RequestType::$typ, $crate::items::Recipient::$rec).encode()
+    }};
+}

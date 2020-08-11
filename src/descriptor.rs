@@ -3,7 +3,7 @@ use core::fmt;
 
 use crate::macros;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 #[repr(C)]
 pub struct USBDeviceDescriptor {
     length: u8,

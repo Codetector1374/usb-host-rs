@@ -18,25 +18,99 @@ use hashbrown::HashMap;
 use spin::RwLock;
 
 use crate::structs::{USBBus, USBDevice};
-use crate::traits::USBHostController;
+use crate::traits::{USBHostController, USBPipe};
+use crate::items::{EndpointType, ControlCommand, RequestType, TransferBuffer, TypeTriple, TransferDirection, Recipient, Error};
+use crate::consts::{REQUEST_GET_DESCRIPTOR, DESCRIPTOR_TYPE_DEVICE};
+use crate::descriptor::USBDeviceDescriptor;
 
 #[macro_use]
 pub mod macros;
 
+pub mod consts;
 pub mod descriptor;
 pub mod items;
 pub mod structs;
 pub mod traits;
 
+fn as_mut_slice<T>(t: &mut T) -> &mut [u8] {
+    unsafe { core::slice::from_raw_parts_mut(t as *mut T as *mut u8, core::mem::size_of::<T>()) }
+}
+
+fn as_slice<T>(t: &T) -> &[u8] {
+    unsafe { core::slice::from_raw_parts(t as *const T as *const u8, core::mem::size_of::<T>()) }
+}
+
+
 
 pub struct USBHost {
-    root_hubs: HashMap<u32, Arc<RwLock<USBDevice>>>,
+    count: u32,
+    root_hubs: HashMap<u32, (Arc<dyn USBHostController>, Arc<RwLock<USBDevice>>)>,
 }
 
 
 impl USBHost {
-    pub fn attach_root_hub(&mut self, controller: Arc<dyn USBHostController>) {}
+    pub fn new() -> Self {
+        Self {
+            count: 0,
+            root_hubs: HashMap::new(),
+        }
+    }
 
-    pub fn new_device(&mut self, parent: Arc<USBDevice>, bus: Arc<USBBus>,
-                      depth: u32, speed: u32, port: u8) {}
+    pub fn attach_root_hub(&mut self, controller: Arc<dyn USBHostController>) -> Arc<RwLock<USBDevice>> {
+        let device = Arc::new(RwLock::new(USBDevice::new(controller.clone())));
+        controller.register_root_hub(&device);
+
+        let count = self.count;
+        self.root_hubs.insert(count, (controller.clone(), device.clone()));
+        self.count = count + 1;
+
+        // open the control "endpoint" on the root hub.
+        controller.pipe_open(&device, None);
+
+        device
+    }
+
+    fn fetch_descriptor<T>(device: &Arc<RwLock<USBDevice>>, req_type: RequestType, desc_type: u8, desc_index: u8, w_index: u16, buf: &mut T) {
+        let control_endpoint = USBPipe { index: 0, endpoint_type: EndpointType::Control };
+        let dev_lock = device.read();
+        let controller = dev_lock.controller.clone();
+
+        let slice = as_mut_slice(buf);
+
+        controller.control_transfer(&device, &control_endpoint, ControlCommand {
+            request_type: TypeTriple(TransferDirection::DeviceToHost, req_type, Recipient::Device),
+            request: REQUEST_GET_DESCRIPTOR,
+            value: ((desc_type as u16) << 8) | (desc_index as u16),
+            index: w_index,
+            length: slice.len() as u16,
+            buffer: TransferBuffer::Read(slice),
+        });
+    }
+
+    pub fn enumerate_devices(&self, device: Arc<RwLock<USBDevice>>) {
+        let mut device_desc = USBDeviceDescriptor::default();
+        Self::fetch_descriptor(&device, RequestType::Standard, DESCRIPTOR_TYPE_DEVICE, 0, 0, &mut device_desc);
+
+        info!("got device descriptor: {:?}", device_desc);
+
+    }
+
+    fn reset_port(&mut self, device: &Arc<RwLock<USBDevice>>) -> Result<(), Error> {
+
+                // self.set_feature(parent.slot_id, port.port_id, FEATURE_PORT_RESET)?;
+                //
+                // self.wait_until("failed to reset port", PORT_RESET_TIMEOUT, |this| {
+                //     if let Ok(status) = this.fetch_port_status(parent.slot_id, port.port_id) {
+                //         status.get_change_reset()
+                //     } else {
+                //         false
+                //     }
+                // })?;
+                //
+                // self.clear_feature(parent.slot_id, port.port_id, FEATURE_C_PORT_RESET)?;
+
+
+
+    }
+
 }
