@@ -88,12 +88,10 @@ impl USBHost {
         // this should be held until the device is added or failed
         let mut bus_guard = bus.write();
 
+        let mut dev = USBDevice::new(bus.clone(), max_packet_size, 0, speed, depth); // No Addr Yet
 
-        let addr = match bus_guard.get_new_addr() {
-            Some(i) => i,
-            None => return Err(USBError::NoFreeDeviceAddress)
-        };
-        let mut dev = USBDevice::new(bus.clone(), addr);
+        // Setup Default EP Descriptor (This is faked so SW stack is unified)
+
 
         // TODO: Temp
         Err(USBError::InvalidArgument)
