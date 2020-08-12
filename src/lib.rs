@@ -15,18 +15,18 @@ extern crate log;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::marker::PhantomData;
 use core::time::Duration;
 
 use hashbrown::HashMap;
 use spin::{Mutex, RwLock};
 
 use crate::consts::*;
-use crate::descriptor::{USBConfigurationDescriptor, USBConfigurationDescriptorSet, USBDeviceDescriptor, USBEndpointDescriptor, USBInterfaceDescriptor, USBInterfaceDescriptorSet, USBHubDescriptor};
+use crate::descriptor::{USBConfigurationDescriptor, USBConfigurationDescriptorSet, USBDeviceDescriptor, USBEndpointDescriptor, USBHubDescriptor, USBInterfaceDescriptor, USBInterfaceDescriptorSet};
 use crate::error::USBError;
 use crate::items::{ControlCommand, EndpointType, Error, Recipient, RequestType, TransferBuffer, TransferDirection, TypeTriple};
-use crate::structs::{USBBus, USBDevice, PortStatus};
+use crate::structs::{PortStatus, USBBus, USBDevice};
 use crate::traits::{USBHostController, USBPipe};
-use downcast_rs::__std::marker::PhantomData;
 
 #[macro_use]
 pub mod macros;
@@ -64,7 +64,6 @@ pub trait HAL2 {
         }
     }
 }
-
 
 
 pub struct USBHost<H: HAL2> {
@@ -135,12 +134,22 @@ impl<H: HAL2> USBHost<H> {
     }
 
     fn device_control_transfer(device: &Arc<RwLock<USBDevice>>, command: ControlCommand) {
-        let control_endpoint = USBPipe { index: 0, endpoint_type: EndpointType::Control };
+        // TODO refactor to store endpoint in the USBDevice then use the existing Control endpoint instead of making a fake one here.
+        let cloned_device = device.clone();
+
         let dev_lock = device.read();
         let bus = dev_lock.bus.clone();
         let mut bus_lock = bus.read();
 
-        bus_lock.controller.control_transfer(&device, &control_endpoint, command);
+        let control_endpoint = USBPipe {
+            device: cloned_device,
+            controller: bus_lock.controller.clone(),
+            index: 0,
+            endpoint_type: EndpointType::Control,
+            is_input: true,
+        };
+
+        bus_lock.controller.control_transfer(&control_endpoint, command);
     }
 
     fn fetch_descriptor_slice(device: &Arc<RwLock<USBDevice>>, req_type: RequestType, desc_type: u8, desc_index: u8, w_index: u16, slice: &mut [u8]) {
@@ -236,7 +245,7 @@ impl<H: HAL2> USBHost<H> {
         }
         let mut buf2: Vec<u8> = Vec::new();
         buf2.resize(buf[0] as usize, 0);
-        Self::fetch_descriptor_slice(device, RequestType::Standard,  DESCRIPTOR_TYPE_STRING, index, lang, &mut buf2);
+        Self::fetch_descriptor_slice(device, RequestType::Standard, DESCRIPTOR_TYPE_STRING, index, lang, &mut buf2);
         assert_eq!(buf2[1], DESCRIPTOR_TYPE_STRING);
         let buf2: Vec<u16> = buf2.chunks_exact(2).map(|l| { u16::from_ne_bytes([l[0], l[1]]) }).collect();
         Ok(String::from_utf16_lossy(&buf2[1..]))
@@ -250,6 +259,11 @@ impl<H: HAL2> USBHost<H> {
 
         let configuration = Self::fetch_configuration_descriptor(&device).unwrap_or_else(|e| panic!("bad: {:?}", e));
         debug!("configuration: {:#?}", configuration);
+
+        {
+            let mut dev_lock = device.write();
+            dev_lock.config_desc = Some(configuration.clone());
+        }
 
         Self::device_control_transfer(&device, ControlCommand {
             request_type: request_type!(HostToDevice, Standard, Device),
@@ -289,127 +303,130 @@ impl<H: HAL2> USBHost<H> {
                 continue;
             }
             match interface.interface.bInterfaceClass {
-        //         CLASS_CODE_MASS => {
-        //             if interface.interface.sub_class != 0x6 {
-        //                 debug!("Skipping MSD with sub-class other than 0x6 (Transparent SCSI)");
-        //                 continue;
-        //             }
-        //
-        //             if interface.interface.protocol != 0x50 {
-        //                 debug!("Skipping MSD with protocol other than bulk-only");
-        //                 continue;
-        //             }
-        //
-        //             if interface.endpoints.len() < 2 {
-        //                 warn!("MSD has not enough endpoints!");
-        //                 continue;
-        //             }
-        //
-        //             let mut input_ring: Option<(u8, u8)> = None;
-        //             let mut output_ring: Option<(u8, u8)> = None;
-        //
-        //             self.with_input_context(port, |this, input_ctx| {
-        //                 for endpoint in interface.endpoints.iter() {
-        //                     if endpoint.bmAttributes != EP_ATTR_BULK {
-        //                         continue;
-        //                     }
-        //
-        //                     let typ = if Self::is_ep_input(endpoint.bEndpointAddress) { EP_TYPE_BULK_IN } else { EP_TYPE_BULK_OUT };
-        //
-        //                     let ring = this.configure_endpoint(port.slot_id, input_ctx,
-        //                                                        endpoint.bEndpointAddress,
-        //                                                        typ, endpoint.wMaxPacketSize,
-        //                                                        endpoint.bInterval, this.get_max_esti_payload(endpoint));
-        //
-        //                     if Self::is_ep_input(endpoint.bEndpointAddress) {
-        //                         input_ring = Some(ring);
-        //                     } else {
-        //                         output_ring = Some(ring);
-        //                     }
-        //                 }
-        //
-        //                 input_ctx.set_configure_ep_meta(configuration.config.config_val,
-        //                                                 interface.interface.interface_number, interface.interface.alt_set);
-        //
-        //                 Ok(())
-        //             })?;
-        //
-        //             let input_ring = input_ring.ok_or(Error::Str("MSD has no bulk input endpoint"))?;
-        //             let output_ring = output_ring.ok_or(Error::Str("MSD has no bulk output endpoint"))?;
-        //
-        //             debug!("MSD endpoints initialized with bulk_in:{:?} bulk_out:{:?}", input_ring, output_ring);
-        //
-        //             let mut buf: Vec<u8> = Vec::new();
-        //             buf.resize(31, 0);
-        //
-        //             let t = [0x55, 0x53, 0x42, 0x43, 0x13, 0x37, 0x04, 0x20, 0x24, 0x00, 0x00, 0x00, 0x80, 0x00, 6, 0x12, 0x00, 0x00, 0x00, 0x24, 0x00];
-        //             (&mut buf[..t.len()]).copy_from_slice(&t);
-        //
-        //             let r = self.transfer_bulk_ring(output_ring, TransferBuffer::Write(buf.as_ref()));
-        //             info!("Transfer Result: {:?}", r);
-        //
-        //             let mut buf: Vec<u8> = Vec::new();
-        //             buf.resize(36, 0);
-        //
-        //             let r = self.transfer_bulk_ring(input_ring, TransferBuffer::Read(buf.as_mut()));
-        //             info!("Transfer Result: {:?}", r);
-        //             info!("Got: {:x?}", buf.as_slice());
-        //
-        //             let mut buf: Vec<u8> = Vec::new();
-        //             buf.resize(13, 0);
-        //
-        //             let r = self.transfer_bulk_ring(input_ring, TransferBuffer::Read(buf.as_mut()));
-        //             info!("Transfer Result: {:?}", r);
-        //             info!("Got: {:x?}", buf.as_slice());
-        //
-        //             self.hal.sleep(Duration::from_secs(5));
-        //         }
-        //         CLASS_CODE_HID => {
-        //             if interface.interface.sub_class != 1 {
-        //                 debug!("Skipping non bios-mode HID device");
-        //                 continue;
-        //             }
-        //
-        //             if interface.interface.protocol != 1 {
-        //                 debug!("Skipping non keyboard");
-        //                 continue;
-        //             }
-        //
-        //             if interface.endpoints.len() == 0 {
-        //                 warn!("keyboard with no endpoints!");
-        //                 continue;
-        //             }
-        //
-        //
-        //             // Enable keyboard
-        //
-        //             self.with_input_context(port, |_this, input_ctx| {
-        //
-        //                 // self.configure_endpoint(port.slot_id, input_ctx.as_mut(),
-        //                 //                         interface.endpoints[0].address,
-        //                 //                         EP_TYPE_INTERRUPT_IN, interface.endpoints[0].max_packet_size,
-        //                 //                         interface.endpoints[0].interval, self.get_max_esti_payload(&interface.endpoints[0]));
-        //
-        //
-        //                 input_ctx.set_configure_ep_meta(configuration.config.config_val,
-        //                                                 interface.interface.interface_number, interface.interface.alt_set);
-        //
-        //                 Ok(())
-        //             })?;
-        //
-        //             debug!("done keyboard configure endpoint");
-        //
-        //             self.hal.sleep(Duration::from_millis(100));
-        //
-        //             debug!("set hid idle");
-        //             self.set_hid_idle(port.slot_id)?;
-        //
-        //             // 0 is Boot Protocol
-        //             debug!("set hid protocol");
-        //             self.set_hid_protocol(port.slot_id, 0)?;
-        //
-        //
-        //         }
+                CLASS_CODE_MASS => {
+                    MassStorageDriver::<H>::probe(&device, interface)
+                }
+                //         CLASS_CODE_MASS => {
+                //             if interface.interface.sub_class != 0x6 {
+                //                 debug!("Skipping MSD with sub-class other than 0x6 (Transparent SCSI)");
+                //                 continue;
+                //             }
+                //
+                //             if interface.interface.protocol != 0x50 {
+                //                 debug!("Skipping MSD with protocol other than bulk-only");
+                //                 continue;
+                //             }
+                //
+                //             if interface.endpoints.len() < 2 {
+                //                 warn!("MSD has not enough endpoints!");
+                //                 continue;
+                //             }
+                //
+                //             let mut input_ring: Option<(u8, u8)> = None;
+                //             let mut output_ring: Option<(u8, u8)> = None;
+                //
+                //             self.with_input_context(port, |this, input_ctx| {
+                //                 for endpoint in interface.endpoints.iter() {
+                //                     if endpoint.bmAttributes != EP_ATTR_BULK {
+                //                         continue;
+                //                     }
+                //
+                //                     let typ = if Self::is_ep_input(endpoint.bEndpointAddress) { EP_TYPE_BULK_IN } else { EP_TYPE_BULK_OUT };
+                //
+                //                     let ring = this.configure_endpoint(port.slot_id, input_ctx,
+                //                                                        endpoint.bEndpointAddress,
+                //                                                        typ, endpoint.wMaxPacketSize,
+                //                                                        endpoint.bInterval, this.get_max_esti_payload(endpoint));
+                //
+                //                     if Self::is_ep_input(endpoint.bEndpointAddress) {
+                //                         input_ring = Some(ring);
+                //                     } else {
+                //                         output_ring = Some(ring);
+                //                     }
+                //                 }
+                //
+                //                 input_ctx.set_configure_ep_meta(configuration.config.config_val,
+                //                                                 interface.interface.interface_number, interface.interface.alt_set);
+                //
+                //                 Ok(())
+                //             })?;
+                //
+                //             let input_ring = input_ring.ok_or(Error::Str("MSD has no bulk input endpoint"))?;
+                //             let output_ring = output_ring.ok_or(Error::Str("MSD has no bulk output endpoint"))?;
+                //
+                //             debug!("MSD endpoints initialized with bulk_in:{:?} bulk_out:{:?}", input_ring, output_ring);
+                //
+                //             let mut buf: Vec<u8> = Vec::new();
+                //             buf.resize(31, 0);
+                //
+                //             let t = [0x55, 0x53, 0x42, 0x43, 0x13, 0x37, 0x04, 0x20, 0x24, 0x00, 0x00, 0x00, 0x80, 0x00, 6, 0x12, 0x00, 0x00, 0x00, 0x24, 0x00];
+                //             (&mut buf[..t.len()]).copy_from_slice(&t);
+                //
+                //             let r = self.transfer_bulk_ring(output_ring, TransferBuffer::Write(buf.as_ref()));
+                //             info!("Transfer Result: {:?}", r);
+                //
+                //             let mut buf: Vec<u8> = Vec::new();
+                //             buf.resize(36, 0);
+                //
+                //             let r = self.transfer_bulk_ring(input_ring, TransferBuffer::Read(buf.as_mut()));
+                //             info!("Transfer Result: {:?}", r);
+                //             info!("Got: {:x?}", buf.as_slice());
+                //
+                //             let mut buf: Vec<u8> = Vec::new();
+                //             buf.resize(13, 0);
+                //
+                //             let r = self.transfer_bulk_ring(input_ring, TransferBuffer::Read(buf.as_mut()));
+                //             info!("Transfer Result: {:?}", r);
+                //             info!("Got: {:x?}", buf.as_slice());
+                //
+                //             self.hal.sleep(Duration::from_secs(5));
+                //         }
+                //         CLASS_CODE_HID => {
+                //             if interface.interface.sub_class != 1 {
+                //                 debug!("Skipping non bios-mode HID device");
+                //                 continue;
+                //             }
+                //
+                //             if interface.interface.protocol != 1 {
+                //                 debug!("Skipping non keyboard");
+                //                 continue;
+                //             }
+                //
+                //             if interface.endpoints.len() == 0 {
+                //                 warn!("keyboard with no endpoints!");
+                //                 continue;
+                //             }
+                //
+                //
+                //             // Enable keyboard
+                //
+                //             self.with_input_context(port, |_this, input_ctx| {
+                //
+                //                 // self.configure_endpoint(port.slot_id, input_ctx.as_mut(),
+                //                 //                         interface.endpoints[0].address,
+                //                 //                         EP_TYPE_INTERRUPT_IN, interface.endpoints[0].max_packet_size,
+                //                 //                         interface.endpoints[0].interval, self.get_max_esti_payload(&interface.endpoints[0]));
+                //
+                //
+                //                 input_ctx.set_configure_ep_meta(configuration.config.config_val,
+                //                                                 interface.interface.interface_number, interface.interface.alt_set);
+                //
+                //                 Ok(())
+                //             })?;
+                //
+                //             debug!("done keyboard configure endpoint");
+                //
+                //             self.hal.sleep(Duration::from_millis(100));
+                //
+                //             debug!("set hid idle");
+                //             self.set_hid_idle(port.slot_id)?;
+                //
+                //             // 0 is Boot Protocol
+                //             debug!("set hid protocol");
+                //             self.set_hid_protocol(port.slot_id, 0)?;
+                //
+                //
+                //         }
                 CLASS_CODE_HUB => {
                     HubDriver::<H>::probe(&device, interface)
                 }
@@ -440,7 +457,6 @@ pub struct HubDriver<H: HAL2> {
 }
 
 impl<H: HAL2> HubDriver<H> {
-
     pub fn probe(device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptorSet) {
         if interface.endpoints.len() == 0 {
             warn!("Hub with no endpoints!");
@@ -502,7 +518,6 @@ impl<H: HAL2> HubDriver<H> {
 
 
         for num in 1..=hub_descriptor.bNbrPorts {
-
             Self::set_feature(device, num, FEATURE_PORT_POWER);
 
             H::sleep(Duration::from_millis(hub_descriptor.bPwrOn2PwrGood as u64 * 2));
@@ -560,16 +575,7 @@ impl<H: HAL2> HubDriver<H> {
 
             debug!("recursive setup_new_device()");
             USBHost::<H>::setup_new_device(child_device.clone());
-
-            // let mut child_port = port.child_port(num);
-            // match self.setup_new_device(&mut child_port) {
-            //     Ok(_) => {}
-            //     Err(e) => {
-            //         error!("Failed to configure child of port {}: {:?}", port.port_id, e);
-            //     }
-            // }
         }
-
     }
 
     fn set_feature(device: &Arc<RwLock<USBDevice>>, port: u8, feature: u8) {
@@ -608,7 +614,6 @@ impl<H: HAL2> HubDriver<H> {
     }
 
     fn reset_port(device: &Arc<RwLock<USBDevice>>, port: u8) {
-
         Self::set_feature(device, port, FEATURE_PORT_RESET);
 
         H::wait_until("failed to reset port", PORT_RESET_TIMEOUT, || {
@@ -617,9 +622,87 @@ impl<H: HAL2> HubDriver<H> {
         }).unwrap_or_else(|e| panic!("{:?}", e));
 
         Self::clear_feature(device, port, FEATURE_C_PORT_RESET);
-
     }
+}
 
+pub struct MassStorageDriver<H: HAL2> {
+    __phantom: PhantomData<H>,
+}
+
+impl<H: HAL2> MassStorageDriver<H> {
+    pub fn probe(device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptorSet) {
+        if interface.interface.bInterfaceSubClass != 0x6 {
+            debug!("Skipping MSD with sub-class other than 0x6 (Transparent SCSI)");
+            return;
+        }
+
+        if interface.interface.bInterfaceProtocol != 0x50 {
+            debug!("Skipping MSD with protocol other than bulk-only");
+            return;
+        }
+
+        if interface.endpoints.len() < 2 {
+            warn!("MSD has not enough endpoints!");
+            return;
+        }
+
+        debug!("acquiring locks");
+
+        let dev_lock = device.read();
+        let bus_lock = dev_lock.bus.read();
+
+        let mut input_ep: Option<Arc<RwLock<USBPipe>>> = None;
+        let mut output_ep: Option<Arc<RwLock<USBPipe>>> = None;
+
+        for endpoint in interface.endpoints.iter() {
+            if endpoint.bmAttributes != EP_ATTR_BULK {
+                continue;
+            }
+
+            debug!("opening pipe: {}", endpoint.bEndpointAddress);
+
+            let pipe = bus_lock.controller.pipe_open(device, Some(endpoint)).unwrap_or_else(|e| panic!("failed to open endpoint"));
+
+            if endpoint.is_input() {
+                input_ep = Some(pipe);
+            } else {
+                output_ep = Some(pipe);
+            }
+        }
+
+        let input_ep = input_ep.ok_or(Error::Str("MSD has no bulk input endpoint")).unwrap_or_else(|e| panic!("{:?}", e));
+        let output_ep = output_ep.ok_or(Error::Str("MSD has no bulk output endpoint")).unwrap_or_else(|e| panic!("{:?}", e));
+
+        debug!("locking endpoints");
+
+        let input_lock = input_ep.read();
+        let output_lock = output_ep.read();
+
+        let mut buf: Vec<u8> = Vec::new();
+        buf.resize(31, 0);
+
+        let t = [0x55, 0x53, 0x42, 0x43, 0x13, 0x37, 0x04, 0x20, 0x24, 0x00, 0x00, 0x00, 0x80, 0x00, 6, 0x12, 0x00, 0x00, 0x00, 0x24, 0x00];
+        (&mut buf[..t.len()]).copy_from_slice(&t);
+
+        let r = output_lock.bulk_write(buf.as_slice());
+        info!("Transfer Result: {:?}", r);
+
+        let mut buf: Vec<u8> = Vec::new();
+        buf.resize(36, 0);
+
+        let r = input_lock.bulk_read(buf.as_mut_slice());
+        info!("Transfer Result: {:?}", r);
+        info!("Got: {:x?}", buf.as_slice());
+
+        let mut buf: Vec<u8> = Vec::new();
+        buf.resize(13, 0);
+
+        let r = input_lock.bulk_read(buf.as_mut_slice());
+        info!("Transfer Result: {:?}", r);
+        info!("Got: {:x?}", buf.as_slice());
+
+        H::sleep(Duration::from_secs(5));
+    }
 }
 
 

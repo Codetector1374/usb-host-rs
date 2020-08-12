@@ -41,14 +41,14 @@ impl USBDeviceDescriptor {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct USBConfigurationDescriptorSet {
     pub config: USBConfigurationDescriptor,
     pub ifsets: Vec<USBInterfaceDescriptorSet>,
 }
 
 // NOT A Descriptor
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct USBInterfaceDescriptorSet {
     pub interface: USBInterfaceDescriptor,
     pub endpoints: Vec<USBEndpointDescriptor>,

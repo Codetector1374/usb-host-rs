@@ -10,7 +10,7 @@ use modular_bitfield::prelude::*;
 use spin::{Mutex, RwLock};
 
 use crate::consts::{DESCRIPTOR_TYPE_ENDPOINT, USBSpeed};
-use crate::descriptor::{USBDeviceDescriptor, USBEndpointDescriptor};
+use crate::descriptor::{USBDeviceDescriptor, USBEndpointDescriptor, USBConfigurationDescriptor, USBConfigurationDescriptorSet};
 use crate::traits::{USBHostController, USBMeta, USBPipe};
 
 /// Describes a Generic USB Device
@@ -22,6 +22,7 @@ pub struct USBDevice {
     pub depth: u8,
     pub langid: u16,
     pub ddesc: USBDeviceDescriptor,
+    pub config_desc: Option<USBConfigurationDescriptorSet>,
 
     pub parent: Option<Arc<RwLock<USBDevice>>>,
     pub def_ep: USBEndpoint,
@@ -38,6 +39,7 @@ impl USBDevice {
             speed,
             depth,
             parent,
+            config_desc: None,
             langid: 0,
             ddesc: USBDeviceDescriptor::default(),
             def_ep: USBEndpoint::default_ep(max_packet_size),
