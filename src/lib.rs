@@ -67,25 +67,26 @@ pub trait HAL2 {
 
 
 pub struct USBHost<H: HAL2> {
-    __phantom: PhantomData<H>,
     count: u32,
     root_hubs: HashMap<u32, Arc<RwLock<USBBus>>>,
+    __phantom: PhantomData<H>,
 }
 
 
 impl<H: HAL2> USBHost<H> {
     pub fn new() -> Self {
         Self {
-            __phantom: PhantomData::default(),
             count: 0,
             root_hubs: HashMap::new(),
+            __phantom: PhantomData::default(),
         }
     }
 
-    pub fn attach_root_hub(&mut self, controller: Arc<dyn USBHostController>) -> Arc<RwLock<USBDevice>> {
+    pub fn attach_root_hub(&mut self, controller: Arc<dyn USBHostController>, speed: USBSpeed) -> Arc<RwLock<USBDevice>> {
         let mut bus = Arc::new(RwLock::new(USBBus::new(controller.clone())));
 
-        let device = Self::new_device(None, bus.clone(), USBSpeed::Super, 0, 1).unwrap_or_else(|e| panic!("Error: {:?}", e));
+        let device = Self::new_device(None, bus.clone(), speed, 0, 1)
+            .unwrap_or_else(|e| panic!("Error: {:?}", e));
         controller.register_root_hub(&device);
 
         {
@@ -469,63 +470,19 @@ impl<H: HAL2> HubDriver<H> {
         USBHost::<H>::fetch_descriptor(&device, RequestType::Class, DESCRIPTOR_TYPE_HUB, 0, 0, &mut hub_descriptor);
         info!("Hub Descriptor: {:?}", hub_descriptor);
 
-        // // Get Status
-        // let mut buf = [0u8; 2];
-        // self.send_control_command(port.slot_id,
-        //                           0x80,
-        //                           0x0, // Get Status
-        //                           0x0, 0x0,
-        //                           2, None, Some(&mut buf),
-        // )?;
-        // debug!("Status Read back: {:?}", buf);
-
         // Setup EPs
         debug!("Found {} eps on this interface", interface.endpoints.len());
 
+        let controller = device.read().bus.read().controller.clone();
+        controller.configure_hub(&device, hub_descriptor.bNbrPorts, hub_descriptor.wHubCharacteristics.get_tt_think_time()).expect("Unable to configure hub");
 
-        // Reconfigure to hub
-        // {
-        //     self.with_input_context(port, |_this, input_ctx| {
-        //         let mut slot_ctx = input_ctx.get_slot_mut();
-        //         slot_ctx.dword1.set_hub(true);
-        //         slot_ctx.numbr_ports = hub_descriptor.num_ports;
-        //         slot_ctx.slot_state = 0;
-        //
-        //         slot_ctx.interrupter_ttt = 0;
-        //
-        //         Ok(())
-        //     })?;
-        //
-        //     // TODO handle hub with no endpoints
-        //     self.with_input_context(port, |this, input_ctx| {
-        //         this.configure_endpoint(port.slot_id, input_ctx,
-        //                                 interface.endpoints[0].bEndpointAddress,
-        //                                 EP_TYPE_INTERRUPT_IN, interface.endpoints[0].wMaxPacketSize,
-        //                                 interface.endpoints[0].bInterval, this.get_max_esti_payload(&interface.endpoints[0]));
-        //
-        //         input_ctx.set_configure_ep_meta(configuration.config.config_val,
-        //                                         interface.interface.interface_number, interface.interface.alt_set);
-        //
-        //         Ok(())
-        //     })?;
-        // }
-
-        // debug!("slot state = {}", self.device_contexts[port.slot_id as usize - 1].as_ref().unwrap().get_slot().slot_state);
-
-        let mut hub_descriptor = USBHubDescriptor::default();
-        USBHost::<H>::fetch_descriptor(&device, RequestType::Class, DESCRIPTOR_TYPE_HUB, 0, 0, &mut hub_descriptor);
-        info!("Hub Descriptor Pt2: {:?}", hub_descriptor);
-
+        // TODO: Potentially Configure the Interrupt EP for Hub (if there is one)
 
         for num in 1..=hub_descriptor.bNbrPorts {
             Self::set_feature(device, num, FEATURE_PORT_POWER);
-
             H::sleep(Duration::from_millis(hub_descriptor.bPwrOn2PwrGood as u64 * 2));
 
             Self::clear_feature(device, num, FEATURE_C_PORT_CONNECTION);
-
-            // self.send_control_command(slot_id, request_type!(DeviceToHost, Class, Other), REQUEST_GET_STATUS, 0, port_id as u16, 4, None, Some(as_mut_slice(&mut status)))?;
-
             let mut status = Self::fetch_port_status(device, num);
 
             debug!("Port {}: status={:?}", num, status);

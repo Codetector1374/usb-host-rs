@@ -3,4 +3,6 @@
 pub enum USBError {
     InvalidArgument,
     NoFreeDeviceAddress,
+    InvalidState,
+    Timeout
 }
