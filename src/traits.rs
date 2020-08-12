@@ -4,11 +4,11 @@ use spin::RwLock;
 
 use crate::items::{Port, EndpointType, Error, ControlCommand};
 use crate::structs::USBDevice;
-use downcast_rs::Downcast;
+use downcast_rs::DowncastSync;
 use crate::descriptor::USBEndpointDescriptor;
 use crate::error::USBError;
 
-pub trait USBMeta : Downcast {}
+pub trait USBMeta : DowncastSync {}
 impl_downcast!(USBMeta);
 
 pub struct USBPipe {
@@ -16,7 +16,7 @@ pub struct USBPipe {
     pub endpoint_type: EndpointType,
 }
 
-pub trait USBHostController {
+pub trait USBHostController: Send + Sync {
 
     fn register_root_hub(&self, device: &Arc<RwLock<USBDevice>>);
 
