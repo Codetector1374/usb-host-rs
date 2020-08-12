@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -5,7 +7,6 @@ use crate::macros;
 
 #[derive(Debug, Default, Copy, Clone)]
 #[repr(C, packed)]
-#[allow(non_snake_case)]
 pub struct USBDeviceDescriptor {
     pub bLength: u8,
     pub bDescriptorType: u8,
@@ -25,6 +26,8 @@ pub struct USBDeviceDescriptor {
     pub bNumConfigurations: u8,
 }
 
+const_assert_size!(USBDeviceDescriptor, 18);
+
 impl USBDeviceDescriptor {
     pub fn get_max_packet_size(&self) -> u32 {
         match self.bMaxPacketSize {
@@ -32,7 +35,8 @@ impl USBDeviceDescriptor {
             16 => 16,
             32 => 32,
             64 => 64,
-            _ => 1u32 << self.bMaxPacketSize,
+            9 => 512,
+            _ => panic!("oofed"),
         }
     }
 }
@@ -59,9 +63,8 @@ impl USBInterfaceDescriptorSet {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Default, Debug, Clone, Copy)]
 #[repr(C, packed)]
-#[allow(non_snake_case)]
 pub struct USBInterfaceDescriptor {
     pub bLength: u8,
     pub bDescriptorType: u8,
@@ -84,8 +87,7 @@ pub enum USBEndpointTransferType {
 }
 
 #[repr(C, packed)]
-#[derive(Debug, Copy, Clone)]
-#[allow(non_snake_case)]
+#[derive(Default, Debug, Copy, Clone)]
 pub struct USBEndpointDescriptor {
     pub bLength: u8,
     pub bDescriptorType: u8,
@@ -111,8 +113,7 @@ impl USBEndpointDescriptor {
 }
 
 #[repr(C, packed)]
-#[derive(Debug, Copy, Clone)]
-#[allow(non_snake_case)]
+#[derive(Default, Debug, Copy, Clone)]
 pub struct USBConfigurationDescriptor {
     pub bLength: u8,
     pub bDescriptorType: u8,
@@ -126,7 +127,6 @@ pub struct USBConfigurationDescriptor {
 
 #[derive(Debug, Default, Copy, Clone)]
 #[repr(C, packed)]
-#[allow(non_snake_case)]
 pub struct USBHubDescriptor {
     pub bLength: u8,
     pub bDescriptorType: u8,
@@ -138,11 +138,10 @@ pub struct USBHubDescriptor {
     pub deviceRemovable: [u8; 32],
 }
 
-#[repr(C, packed)]
-#[derive(Default, Copy, Clone)]
-#[allow(non_snake_case)]
-pub struct USBStringDescriptor {
-    pub bLength: u8,
-    pub bDescriptorType: u8,
-    pub bString: [u16; 126],
-}
+// #[repr(C, packed)]
+// #[derive(Default, Copy, Clone)]
+// pub struct USBStringDescriptor {
+//     pub bLength: u8,
+//     pub bDescriptorType: u8,
+//     pub bString: [u16; 126],
+// }

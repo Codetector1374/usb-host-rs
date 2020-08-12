@@ -271,6 +271,7 @@ pub const FEATURE_PORT_TEST: u8 = 0x15;
 pub const FEATURE_PORT_INDICATOR: u8 = 0x16;
 
 #[repr(u8)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum USBSpeed {
     Invalid = 0,
     Low = 1,
@@ -287,5 +288,9 @@ impl USBSpeed {
         } else {
             USBSpeed::Invalid
         }
+    }
+
+    pub fn is_low_or_full_speed(&self) -> bool {
+        *self == USBSpeed::Low || *self == USBSpeed::Full
     }
 }

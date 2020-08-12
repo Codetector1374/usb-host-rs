@@ -21,11 +21,13 @@ pub trait USBHostController {
 
     fn pipe_open(&self, device: &Arc<RwLock<USBDevice>>, endpoint: Option<&USBEndpointDescriptor>) -> Result<Arc<RwLock<USBPipe>>, Error>;
 
-    fn set_address(&self, device: &Arc<RwLock<USBDevice>>);
+    fn set_address(&self, device: &Arc<RwLock<USBDevice>>, addr: u32);
 
     fn control_transfer(&self, device: &Arc<RwLock<USBDevice>>, endpoint: &USBPipe, command: ControlCommand);
 
+    fn allocate_slot(&self) -> u8;
 
+    fn free_slot(&self, slot: u8);
 
 }
 
