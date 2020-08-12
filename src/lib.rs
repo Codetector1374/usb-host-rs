@@ -20,7 +20,7 @@ use core::time::Duration;
 use hashbrown::HashMap;
 use spin::{Mutex, RwLock};
 
-use crate::consts::{DESCRIPTOR_TYPE_CONFIGURATION, DESCRIPTOR_TYPE_DEVICE, REQUEST_GET_DESCRIPTOR, REQUEST_SET_CONFIGURATION, USBSpeed, DESCRIPTOR_TYPE_STRING, DESCRIPTOR_TYPE_HUB, FEATURE_PORT_POWER, FEATURE_C_PORT_CONNECTION, REQUEST_SET_FEATURE, REQUEST_CLEAR_FEATURE, REQUEST_GET_STATUS, FEATURE_PORT_RESET, FEATURE_C_PORT_RESET, PORT_RESET_TIMEOUT};
+use crate::consts::*;
 use crate::descriptor::{USBConfigurationDescriptor, USBConfigurationDescriptorSet, USBDeviceDescriptor, USBEndpointDescriptor, USBInterfaceDescriptor, USBInterfaceDescriptorSet, USBHubDescriptor};
 use crate::error::USBError;
 use crate::items::{ControlCommand, EndpointType, Error, Recipient, RequestType, TransferBuffer, TransferDirection, TypeTriple};
@@ -167,6 +167,9 @@ impl<H: HAL2> USBHost<H> {
         Self::fetch_descriptor_slice(device, RequestType::Standard, DESCRIPTOR_TYPE_CONFIGURATION, 0, 0, descriptor_buf.as_mut_slice());
 
         as_mut_slice(&mut config_descriptor).copy_from_slice(&descriptor_buf[..core::mem::size_of::<USBConfigurationDescriptor>()]);
+
+        debug!("Parsing configuration: {:?}", config_descriptor);
+        debug!("raw: {:x?}", descriptor_buf.as_slice());
 
         let mut current_index = core::mem::size_of::<USBConfigurationDescriptor>();
         let mut interfaces: Vec<USBInterfaceDescriptorSet> = Default::default();
@@ -528,15 +531,20 @@ impl<H: HAL2> HubDriver<H> {
 
             debug!("creating new child device");
 
-            let child_device = USBHost::<H>::new_device(Some(child_parent_device), child_bus, status.get_speed(), slot as u32, num)
-                .unwrap_or_else(|e| panic!("{:?}", e));
-
             debug!("resetting device");
             Self::reset_port(device, num);
+
+            let status = Self::fetch_port_status(device, num);
+
+            let child_device = USBHost::<H>::new_device(Some(child_parent_device), child_bus, status.get_speed(), slot as u32, num)
+                .unwrap_or_else(|e| panic!("{:?}", e));
 
             debug!("opening control pipe");
             // open the control "endpoint" on the root hub.
             bus_lock.controller.pipe_open(&child_device, None);
+
+            H::sleep(Duration::from_millis(10));
+            debug!("Going to fetch descriptor...");
 
             let mut buf = [0u8; 8];
             USBHost::<H>::fetch_descriptor_slice(&child_device, RequestType::Standard, DESCRIPTOR_TYPE_DEVICE, 0, 0, &mut buf);
