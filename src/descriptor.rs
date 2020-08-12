@@ -2,6 +2,7 @@
 
 use alloc::vec::Vec;
 use core::fmt;
+use modular_bitfield::prelude::*;
 
 use crate::macros;
 
@@ -125,13 +126,24 @@ pub struct USBConfigurationDescriptor {
     pub bMaxPower: u8,
 }
 
+#[bitfield]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct USBHubDescriptorHubCharacteristics {
+    logical_pwr_switching_mode: B2,
+    is_compound_device: bool,
+    over_current_protection_mode: B2,
+    tt_think_time: B2,
+    port_indicator_support: bool,
+    __reserved: B8,
+}
+
 #[derive(Debug, Default, Copy, Clone)]
 #[repr(C, packed)]
 pub struct USBHubDescriptor {
     pub bLength: u8,
     pub bDescriptorType: u8,
     pub bNbrPorts: u8,
-    pub wHubCharacteristics: u16,
+    pub wHubCharacteristics: USBHubDescriptorHubCharacteristics,
     /// Power On to Power Good Time in 2ms interval
     pub bPwrOn2PwrGood: u8,
     pub bHubContrCurrent: u8,

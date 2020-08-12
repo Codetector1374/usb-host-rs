@@ -6,6 +6,7 @@ use crate::items::{Port, EndpointType, Error, ControlCommand};
 use crate::structs::USBDevice;
 use downcast_rs::Downcast;
 use crate::descriptor::USBEndpointDescriptor;
+use crate::error::USBError;
 
 pub trait USBMeta : Downcast {}
 impl_downcast!(USBMeta);
@@ -22,6 +23,8 @@ pub trait USBHostController {
     fn pipe_open(&self, device: &Arc<RwLock<USBDevice>>, endpoint: Option<&USBEndpointDescriptor>) -> Result<Arc<RwLock<USBPipe>>, Error>;
 
     fn set_address(&self, device: &Arc<RwLock<USBDevice>>, addr: u32);
+
+    fn configure_hub(&self, device: &Arc<RwLock<USBDevice>>, nbr_ports: u8, ttt: u8) -> Result<(), USBError>;
 
     fn control_transfer(&self, device: &Arc<RwLock<USBDevice>>, endpoint: &USBPipe, command: ControlCommand);
 
