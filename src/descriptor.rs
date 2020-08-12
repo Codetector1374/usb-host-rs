@@ -5,6 +5,7 @@ use core::fmt;
 use modular_bitfield::prelude::*;
 
 use crate::macros;
+use crate::items::EndpointType;
 
 #[derive(Debug, Default, Copy, Clone)]
 #[repr(C, packed)]
@@ -78,15 +79,6 @@ pub struct USBInterfaceDescriptor {
     pub iInterface: u8,
 }
 
-#[repr(u8)]
-#[derive(Debug, Copy, Clone)]
-pub enum USBEndpointTransferType {
-    Control = 0,
-    Isochronous = 1,
-    Bulk = 2,
-    Interrupt = 3,
-}
-
 #[repr(C, packed)]
 #[derive(Default, Debug, Copy, Clone)]
 pub struct USBEndpointDescriptor {
@@ -108,8 +100,14 @@ impl USBEndpointDescriptor {
         (self.bEndpointAddress & 0x80) != 0
     }
 
-    pub fn transfer_type(&self) -> USBEndpointTransferType {
-        unsafe { core::mem::transmute(self.bmAttributes & 0x3 as u8) }
+    pub fn transfer_type(&self) -> EndpointType {
+        match self.bmAttributes & 0b11 {
+            0 => EndpointType::Control,
+            1 => EndpointType::Isochronous,
+            2 => EndpointType::Bulk,
+            3 => EndpointType::Interrupt,
+            _ => unreachable!(),
+        }
     }
 }
 
