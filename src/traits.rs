@@ -29,13 +29,13 @@ impl USBPipe {
     }
 
     pub fn bulk_write(&self, buf: &[u8]) -> Result<usize, Error> {
-        assert!(matches!(self.endpoint_type, EndpointType::Bulk));
+        assert!(matches!(self.endpoint_type, EndpointType::Bulk | EndpointType::Interrupt));
         assert!(!self.is_input);
         self.controller.bulk_transfer(&self, TransferBuffer::Write(buf))
     }
 
     pub fn bulk_read(&self, buf: &mut [u8]) -> Result<usize, Error> {
-        assert!(matches!(self.endpoint_type, EndpointType::Bulk));
+        assert!(matches!(self.endpoint_type, EndpointType::Bulk | EndpointType::Interrupt));
         assert!(self.is_input);
         self.controller.bulk_transfer(&self, TransferBuffer::Read(buf))
     }
