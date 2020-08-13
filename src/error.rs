@@ -23,14 +23,11 @@ impl USBErrorKind {
 pub struct USBError {
     pub kind: USBErrorKind,
     pub msg: &'static str,
-
-    // reserve struct initialization
-    __res: (),
 }
 
 impl USBError {
     pub fn new(kind: USBErrorKind, msg: &'static str) -> Self {
-        USBError { kind, msg, __res: () }
+        USBError { kind, msg }
     }
 }
 
