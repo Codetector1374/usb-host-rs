@@ -1,2 +1,2 @@
-
-pub(crate) mod mass_storage;
+pub mod mass_storage;
+pub mod keyboard;
