@@ -50,7 +50,7 @@ pub(crate) fn as_slice<T>(t: &T) -> &[u8] {
     unsafe { core::slice::from_raw_parts(t as *const T as *const u8, core::mem::size_of::<T>()) }
 }
 
-pub trait HAL2 {
+pub trait UsbHAL {
     fn sleep(dur: Duration);
 
     fn current_time() -> Duration;
@@ -70,14 +70,14 @@ pub trait HAL2 {
 }
 
 
-pub struct USBHost<H: HAL2> {
+pub struct USBHost<H: UsbHAL> {
     count: u32,
     root_hubs: HashMap<u32, Arc<RwLock<USBBus>>>,
     __phantom: PhantomData<H>,
 }
 
 
-impl<H: HAL2> USBHost<H> {
+impl<H: UsbHAL> USBHost<H> {
     pub fn new() -> Self {
         Self {
             count: 0,
@@ -347,11 +347,11 @@ impl<H: HAL2> USBHost<H> {
     }
 }
 
-pub struct HubDriver<H: HAL2> {
+pub struct HubDriver<H: UsbHAL> {
     __phantom: PhantomData<H>,
 }
 
-impl<H: HAL2> HubDriver<H> {
+impl<H: UsbHAL> HubDriver<H> {
     pub fn probe(device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptorSet) -> USBResult<()> {
         if interface.endpoints.len() == 0 {
             warn!("Hub with no endpoints!");
@@ -487,11 +487,11 @@ impl<H: HAL2> HubDriver<H> {
     }
 }
 
-pub struct HIDDriver<H: HAL2> {
+pub struct HIDDriver<H: UsbHAL> {
     __phantom: PhantomData<H>,
 }
 
-impl<H: HAL2> HIDDriver<H> {
+impl<H: UsbHAL> HIDDriver<H> {
     pub fn probe(device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptorSet) -> USBResult<()> {
         if interface.interface.bInterfaceSubClass != 1 {
             debug!("Skipping non bios-mode HID device");

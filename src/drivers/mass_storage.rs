@@ -5,12 +5,12 @@ use core::time::Duration;
 
 use spin::RwLock;
 
-use crate::{HAL2, USBErrorKind, USBResult, as_slice, as_mut_slice};
+use crate::{UsbHAL, USBErrorKind, USBResult, as_slice, as_mut_slice};
 use crate::descriptor::USBInterfaceDescriptorSet;
 use crate::structs::{USBDevice, USBPipe};
 use crate::items::{EndpointType, TransferBuffer};
 
-pub struct MassStorageDriver<H: HAL2> {
+pub struct MassStorageDriver<H: UsbHAL> {
     __phantom: PhantomData<H>,
 }
 
@@ -107,7 +107,7 @@ impl BulkOnlyProtocol {
 }
 
 
-impl<H: HAL2> MassStorageDriver<H> {
+impl<H: UsbHAL> MassStorageDriver<H> {
     pub fn probe(device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptorSet) -> USBResult<()> {
         if interface.interface.bInterfaceSubClass != 0x6 {
             debug!("Skipping MSD with sub-class other than 0x6 (Transparent SCSI)");
