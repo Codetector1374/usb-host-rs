@@ -28,23 +28,25 @@ pub use crate::error::{USBError, USBErrorKind, USBResult};
 use crate::items::{ControlCommand, EndpointType, PortStatus, Recipient, RequestType, TransferBuffer, TransferDirection, TypeTriple};
 use crate::structs::{USBBus, USBDevice, USBPipe};
 use crate::traits::USBHostController;
+use crate::drivers::mass_storage::MassStorageDriver;
 
 #[macro_use]
 pub mod macros;
 
 pub mod consts;
 pub mod descriptor;
+mod drivers;
 mod error;
 pub mod items;
 pub mod structs;
 pub mod traits;
 
 
-fn as_mut_slice<T>(t: &mut T) -> &mut [u8] {
+pub(crate) fn as_mut_slice<T>(t: &mut T) -> &mut [u8] {
     unsafe { core::slice::from_raw_parts_mut(t as *mut T as *mut u8, core::mem::size_of::<T>()) }
 }
 
-fn as_slice<T>(t: &T) -> &[u8] {
+pub(crate) fn as_slice<T>(t: &T) -> &[u8] {
     unsafe { core::slice::from_raw_parts(t as *const T as *const u8, core::mem::size_of::<T>()) }
 }
 
@@ -532,25 +534,25 @@ impl<H: HAL2> HIDDriver<H> {
         debug!("set hid protocol");
         Self::set_hid_protocol(device, 0)?;
 
-        let pipe = pipe.read();
-
-        for i in 0..1000 {
-            debug!("set hid report");
-            Self::set_hid_report(device, &interface.interface, if i % 2 == 0 { 0 } else { 0xFF })?;
-
-            debug!("fetch hid report");
-            let mut buf = Box::new([0u8; 128]);
-            match pipe.bulk_read(&mut buf[0..8]) {
-                Ok(_) => {
-                    info!("got response: {:?}", &buf[0..8]);
-                }
-                Err(e) => {
-                    warn!("failed to read: {:?}", e);
-                }
-            }
-
-            H::sleep(Duration::from_millis(500));
-        }
+        // let pipe = pipe.read();
+        //
+        // for i in 0..1000 {
+        //     debug!("set hid report");
+        //     Self::set_hid_report(device, &interface.interface, if i % 2 == 0 { 0 } else { 0xFF })?;
+        //
+        //     debug!("fetch hid report");
+        //     let mut buf = Box::new([0u8; 128]);
+        //     match pipe.bulk_read(&mut buf[0..8]) {
+        //         Ok(_) => {
+        //             info!("got response: {:?}", &buf[0..8]);
+        //         }
+        //         Err(e) => {
+        //             warn!("failed to read: {:?}", e);
+        //         }
+        //     }
+        //
+        //     H::sleep(Duration::from_millis(500));
+        // }
 
         Ok(())
     }
@@ -591,85 +593,6 @@ impl<H: HAL2> HIDDriver<H> {
     }
 }
 
-pub struct MassStorageDriver<H: HAL2> {
-    __phantom: PhantomData<H>,
-}
-
-impl<H: HAL2> MassStorageDriver<H> {
-    pub fn probe(device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptorSet) -> USBResult<()> {
-        if interface.interface.bInterfaceSubClass != 0x6 {
-            debug!("Skipping MSD with sub-class other than 0x6 (Transparent SCSI)");
-            return Ok(());
-        }
-
-        if interface.interface.bInterfaceProtocol != 0x50 {
-            debug!("Skipping MSD with protocol other than bulk-only");
-            return Ok(());
-        }
-
-        if interface.endpoints.len() < 2 {
-            return USBErrorKind::InvalidDescriptor.err("MSD has not enough endpoints!");
-        }
-
-        debug!("acquiring locks");
-
-        let dev_lock = device.read();
-        let bus_lock = dev_lock.bus.read();
-
-        let mut input_ep: Option<Arc<RwLock<USBPipe>>> = None;
-        let mut output_ep: Option<Arc<RwLock<USBPipe>>> = None;
-
-        for endpoint in interface.endpoints.iter() {
-            if !matches!(endpoint.transfer_type(), EndpointType::Bulk) {
-                continue;
-            }
-
-            debug!("opening pipe: {}", endpoint.bEndpointAddress);
-
-            let pipe = bus_lock.controller.pipe_open(device, Some(endpoint))?;
-
-            if endpoint.is_input() {
-                input_ep = Some(pipe);
-            } else {
-                output_ep = Some(pipe);
-            }
-        }
-
-        let input_ep = input_ep.ok_or(USBErrorKind::InvalidState.msg("MSD has no bulk input endpoint"))?;
-        let output_ep = output_ep.ok_or(USBErrorKind::InvalidState.msg("MSD has no bulk output endpoint"))?;
-
-        debug!("locking endpoints");
-
-        let input_lock = input_ep.read();
-        let output_lock = output_ep.read();
-
-        let mut buf: Vec<u8> = Vec::new();
-        buf.resize(31, 0);
-
-        let t = [0x55, 0x53, 0x42, 0x43, 0x13, 0x37, 0x04, 0x20, 0x24, 0x00, 0x00, 0x00, 0x80, 0x00, 6, 0x12, 0x00, 0x00, 0x00, 0x24, 0x00];
-        (&mut buf[..t.len()]).copy_from_slice(&t);
-
-        let r = output_lock.bulk_write(buf.as_slice())?;
-        info!("Transfer Result: {:?}", r);
-
-        let mut buf: Vec<u8> = Vec::new();
-        buf.resize(36, 0);
-
-        let r = input_lock.bulk_read(buf.as_mut_slice())?;
-        info!("Transfer Result: {:?}", r);
-        info!("Got: {:x?}", buf.as_slice());
-
-        let mut buf: Vec<u8> = Vec::new();
-        buf.resize(13, 0);
-
-        let r = input_lock.bulk_read(buf.as_mut_slice())?;
-        info!("Transfer Result: {:?}", r);
-        info!("Got: {:x?}", buf.as_slice());
-
-        H::sleep(Duration::from_secs(5));
-        Ok(())
-    }
-}
 
 
 

@@ -11,4 +11,5 @@ downcast-rs = { version = "1.2.0", default-features = false }
 hashbrown = { version = "0.6.3", features = [] }
 log = { version = "0.4.8", features = [] }
 modular-bitfield = "0.6.0"
+pretty-hex = "0.1.1"
 spin = "0.5.2"
