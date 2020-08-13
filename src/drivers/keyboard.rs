@@ -4,19 +4,19 @@ use core::time::Duration;
 
 use spin::RwLock;
 
-use crate::{HAL2, USBErrorKind, USBHost, USBResult};
+use crate::{UsbHAL, USBErrorKind, USBHost, USBResult};
 use crate::consts::*;
 use crate::descriptor::{USBInterfaceDescriptor, USBInterfaceDescriptorSet};
 use crate::items::{ControlCommand, TransferBuffer, EndpointType};
 use crate::structs::{USBDevice, USBPipe};
 
-pub struct HIDKeyboard<H: HAL2> {
+pub struct HIDKeyboard<H: UsbHAL> {
     __phantom: PhantomData<H>,
     device: Arc<RwLock<USBDevice>>,
     pipe: Arc<RwLock<USBPipe>>,
 }
 
-impl<H: HAL2> HIDKeyboard<H> {
+impl<H: UsbHAL> HIDKeyboard<H> {
     pub fn probe(device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptorSet) -> USBResult<()> {
         if interface.interface.bInterfaceSubClass != 1 {
             debug!("Skipping non bios-mode HID device");
