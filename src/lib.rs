@@ -23,21 +23,22 @@ use hashbrown::HashMap;
 use spin::{Mutex, RwLock};
 
 use crate::consts::*;
-use crate::descriptor::{USBConfigurationDescriptor, USBConfigurationDescriptorSet, USBDeviceDescriptor, USBEndpointDescriptor, USBHubDescriptor, USBInterfaceDescriptor, USBInterfaceDescriptorSet};
-use crate::error::USBError;
-use crate::items::{ControlCommand, EndpointType, Error, Recipient, RequestType, TransferBuffer, TransferDirection, TypeTriple};
-use crate::structs::{PortStatus, USBBus, USBDevice};
-use crate::traits::{USBHostController, USBPipe};
+use crate::descriptor::*;
+pub use crate::error::{USBError, USBErrorKind, USBResult};
+use crate::items::{ControlCommand, EndpointType, PortStatus, Recipient, RequestType, TransferBuffer, TransferDirection, TypeTriple};
+use crate::structs::{USBBus, USBDevice, USBPipe};
+use crate::traits::USBHostController;
 
 #[macro_use]
 pub mod macros;
 
 pub mod consts;
 pub mod descriptor;
+mod error;
 pub mod items;
 pub mod structs;
 pub mod traits;
-pub mod error;
+
 
 fn as_mut_slice<T>(t: &mut T) -> &mut [u8] {
     unsafe { core::slice::from_raw_parts_mut(t as *mut T as *mut u8, core::mem::size_of::<T>()) }
@@ -108,14 +109,14 @@ impl<H: HAL2> USBHost<H> {
     /// Called when a new device is put into powered state but not yet addressed.
     /// This function will get the initial descriptor, set address, get full descriptor and attach
     /// a driver (if applicable)
-    pub fn new_device(parent: Option<Arc<RwLock<USBDevice>>>, bus: Arc<RwLock<USBBus>>, speed: USBSpeed, addr: u32, port: u8) -> Result<Arc<RwLock<USBDevice>>, USBError> {
+    pub fn new_device(parent: Option<Arc<RwLock<USBDevice>>>, bus: Arc<RwLock<USBBus>>, speed: USBSpeed, addr: u32, port: u8) -> USBResult<Arc<RwLock<USBDevice>>> {
         // Calculate initial MPS
         let max_packet_size = match speed {
             USBSpeed::Low => 8u16,
             USBSpeed::Full |
             USBSpeed::High => 64u16,
             USBSpeed::Super => 512u16,
-            _ => return Err(USBError::InvalidArgument),
+            _ => return USBErrorKind::InvalidArgument.err("unknown usb speed"),
         };
 
         let depth = match parent.as_ref() {
@@ -135,7 +136,7 @@ impl<H: HAL2> USBHost<H> {
         Ok(Arc::new(RwLock::new(dev)))
     }
 
-    fn device_control_transfer(device: &Arc<RwLock<USBDevice>>, command: ControlCommand) {
+    fn device_control_transfer(device: &Arc<RwLock<USBDevice>>, command: ControlCommand) -> USBResult<()> {
         // TODO refactor to store endpoint in the USBDevice then use the existing Control endpoint instead of making a fake one here.
         let cloned_device = device.clone();
 
@@ -151,10 +152,10 @@ impl<H: HAL2> USBHost<H> {
             is_input: true,
         };
 
-        bus_lock.controller.control_transfer(&control_endpoint, command);
+        bus_lock.controller.control_transfer(&control_endpoint, command)
     }
 
-    fn fetch_descriptor_slice(device: &Arc<RwLock<USBDevice>>, req_type: RequestType, desc_type: u8, desc_index: u8, w_index: u16, slice: &mut [u8]) {
+    fn fetch_descriptor_slice(device: &Arc<RwLock<USBDevice>>, req_type: RequestType, desc_type: u8, desc_index: u8, w_index: u16, slice: &mut [u8]) -> USBResult<()> {
         Self::device_control_transfer(device, ControlCommand {
             request_type: TypeTriple(TransferDirection::DeviceToHost, req_type, Recipient::Device),
             request: REQUEST_GET_DESCRIPTOR,
@@ -162,14 +163,14 @@ impl<H: HAL2> USBHost<H> {
             index: w_index,
             length: slice.len() as u16,
             buffer: TransferBuffer::Read(slice),
-        });
+        })
     }
 
-    fn fetch_descriptor<T>(device: &Arc<RwLock<USBDevice>>, req_type: RequestType, desc_type: u8, desc_index: u8, w_index: u16, buf: &mut T) {
-        Self::fetch_descriptor_slice(device, req_type, desc_type, desc_index, w_index, as_mut_slice(buf));
+    fn fetch_descriptor<T>(device: &Arc<RwLock<USBDevice>>, req_type: RequestType, desc_type: u8, desc_index: u8, w_index: u16, buf: &mut T) -> USBResult<()> {
+        Self::fetch_descriptor_slice(device, req_type, desc_type, desc_index, w_index, as_mut_slice(buf))
     }
 
-    fn fetch_configuration_descriptor(device: &Arc<RwLock<USBDevice>>) -> Result<USBConfigurationDescriptorSet, Error> {
+    fn fetch_configuration_descriptor(device: &Arc<RwLock<USBDevice>>) -> Result<USBConfigurationDescriptorSet, USBError> {
         let mut config_descriptor = USBConfigurationDescriptor::default();
         Self::fetch_descriptor_slice(device, RequestType::Standard, DESCRIPTOR_TYPE_CONFIGURATION, 0, 0, &mut as_mut_slice(&mut config_descriptor)[..4]);
 
@@ -235,15 +236,15 @@ impl<H: HAL2> USBHost<H> {
         Ok(USBConfigurationDescriptorSet { config: config_descriptor, ifsets: interfaces })
     }
 
-    fn fetch_string_descriptor(device: &Arc<RwLock<USBDevice>>, index: u8, lang: u16) -> Result<String, Error> {
+    fn fetch_string_descriptor(device: &Arc<RwLock<USBDevice>>, index: u8, lang: u16) -> Result<String, USBError> {
         if index == 0 {
-            return Err(Error::Str("invalid descriptor index 0"));
+            return USBErrorKind::InvalidArgument.err("invalid descriptor index 0");
         }
 
         let mut buf = [0u8; 1];
         Self::fetch_descriptor_slice(device, RequestType::Standard, DESCRIPTOR_TYPE_STRING, index, lang, &mut buf);
         if buf[0] == 0 {
-            return Err(Error::Str("USBError::DescriptorNotAvailable"));
+            return USBErrorKind::InvalidDescriptor.err("descriptor not available")
         }
         let mut buf2: Vec<u8> = Vec::new();
         buf2.resize(buf[0] as usize, 0);
@@ -253,7 +254,7 @@ impl<H: HAL2> USBHost<H> {
         Ok(String::from_utf16_lossy(&buf2[1..]))
     }
 
-    pub fn setup_new_device(device: Arc<RwLock<USBDevice>>) {
+    pub fn setup_new_device(device: Arc<RwLock<USBDevice>>) -> USBResult<()> {
         let mut device_desc = USBDeviceDescriptor::default();
         Self::fetch_descriptor(&device, RequestType::Standard, DESCRIPTOR_TYPE_DEVICE, 0, 0, &mut device_desc);
 
@@ -306,20 +307,28 @@ impl<H: HAL2> USBHost<H> {
             }
             match interface.interface.bInterfaceClass {
                 CLASS_CODE_MASS => {
-                    MassStorageDriver::<H>::probe(&device, interface)
+                    if let Err(e) = MassStorageDriver::<H>::probe(&device, interface) {
+                        error!("failed to probe msd: {:?}", e);
+                    }
                 }
                 CLASS_CODE_HID => {
-                    HIDDriver::<H>::probe(&device, interface)
+                    if let Err(e) = HIDDriver::<H>::probe(&device, interface) {
+                        error!("failed to probe hid: {:?}", e);
+                    }
                 }
                 CLASS_CODE_HUB => {
-                    HubDriver::<H>::probe(&device, interface)
+                    if let Err(e) = HubDriver::<H>::probe(&device, interface) {
+                        error!("failed to probe hub: {:?}", e);
+                    }
                 }
                 _ => {}
             }
         }
+
+        Ok(())
     }
 
-    fn reset_port(&mut self, device: &Arc<RwLock<USBDevice>>) -> Result<(), Error> {
+    fn reset_port(&mut self, device: &Arc<RwLock<USBDevice>>) -> Result<(), USBError> {
 
         // self.set_feature(parent.slot_id, port.port_id, FEATURE_PORT_RESET)?;
         //
@@ -341,7 +350,7 @@ pub struct HubDriver<H: HAL2> {
 }
 
 impl<H: HAL2> HubDriver<H> {
-    pub fn probe(device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptorSet) {
+    pub fn probe(device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptorSet) -> USBResult<()> {
         if interface.endpoints.len() == 0 {
             warn!("Hub with no endpoints!");
         }
@@ -362,63 +371,72 @@ impl<H: HAL2> HubDriver<H> {
         // TODO: Potentially Configure the Interrupt EP for Hub (if there is one)
 
         for num in 1..=hub_descriptor.bNbrPorts {
-            Self::set_feature(device, num, FEATURE_PORT_POWER);
-            H::sleep(Duration::from_millis(hub_descriptor.bPwrOn2PwrGood as u64 * 2));
-
-            Self::clear_feature(device, num, FEATURE_C_PORT_CONNECTION);
-            let mut status = Self::fetch_port_status(device, num);
-
-            debug!("Port {}: status={:?}", num, status);
-
-            if !status.get_device_connected() {
-                continue;
+            if let Err(e) = HubDriver::<H>::probe_port(device, &hub_descriptor, num) {
+                error!("failed to probe hub port {}: {:?}", num, e);
             }
-
-            debug!("Acquiring locks");
-
-            let child_parent_device = device.clone();
-
-            let dev_lock = device.read();
-
-            let child_bus = dev_lock.bus.clone();
-            let bus_lock = dev_lock.bus.read();
-            let slot = bus_lock.controller.allocate_slot();
-
-            debug!("creating new child device");
-
-            debug!("resetting device");
-            Self::reset_port(device, num);
-
-            let status = Self::fetch_port_status(device, num);
-
-            let child_device = USBHost::<H>::new_device(Some(child_parent_device), child_bus, status.get_speed(), slot as u32, num)
-                .unwrap_or_else(|e| panic!("{:?}", e));
-
-            debug!("opening control pipe");
-            // open the control "endpoint" on the root hub.
-            bus_lock.controller.pipe_open(&child_device, None);
-
-            H::sleep(Duration::from_millis(10));
-            debug!("Going to fetch descriptor...");
-
-            let mut buf = [0u8; 8];
-            USBHost::<H>::fetch_descriptor_slice(&child_device, RequestType::Standard, DESCRIPTOR_TYPE_DEVICE, 0, 0, &mut buf);
-            debug!("First fetch descriptor: {:?}", buf);
-
-            {
-                let mut d = child_device.write();
-                d.ddesc.bMaxPacketSize = buf[7];
-            }
-
-            debug!("setting address");
-            bus_lock.controller.set_address(&child_device, slot as u32);
-
-            debug!("recursive setup_new_device()");
-            USBHost::<H>::setup_new_device(child_device.clone());
         }
+
+        Ok(())
     }
 
-    fn set_feature(device: &Arc<RwLock<USBDevice>>, port: u8, feature: u8) {
+    fn probe_port(device: &Arc<RwLock<USBDevice>>, hub_descriptor: &USBHubDescriptor, port: u8) -> USBResult<()> {
+        Self::set_feature(device, port, FEATURE_PORT_POWER)?;
+        H::sleep(Duration::from_millis(hub_descriptor.bPwrOn2PwrGood as u64 * 2));
+
+        Self::clear_feature(device, port, FEATURE_C_PORT_CONNECTION)?;
+        let mut status = Self::fetch_port_status(device, port)?;
+
+        debug!("Port {}: status={:?}", port, status);
+
+        if !status.get_device_connected() {
+            return Ok(());
+        }
+
+        debug!("Acquiring locks");
+
+        let child_parent_device = device.clone();
+
+        let dev_lock = device.read();
+
+        let child_bus = dev_lock.bus.clone();
+        let bus_lock = dev_lock.bus.read();
+        let slot = bus_lock.controller.allocate_slot()?;
+
+        debug!("creating new child device");
+
+        debug!("resetting device");
+        Self::reset_port(device, port)?;
+
+        let status = Self::fetch_port_status(device, port)?;
+
+        let child_device = USBHost::<H>::new_device(Some(child_parent_device), child_bus, status.get_speed(), slot as u32, port)?;
+
+        debug!("opening control pipe");
+        // open the control "endpoint" on the root hub.
+        bus_lock.controller.pipe_open(&child_device, None)?;
+
+        H::sleep(Duration::from_millis(10));
+        debug!("Going to fetch descriptor...");
+
+        let mut buf = [0u8; 8];
+        USBHost::<H>::fetch_descriptor_slice(&child_device, RequestType::Standard, DESCRIPTOR_TYPE_DEVICE, 0, 0, &mut buf)?;
+        debug!("First fetch descriptor: {:?}", buf);
+
+        {
+            let mut d = child_device.write();
+            d.ddesc.bMaxPacketSize = buf[7];
+        }
+
+        debug!("setting address");
+        bus_lock.controller.set_address(&child_device, slot as u32)?;
+
+        debug!("recursive setup_new_device()");
+        USBHost::<H>::setup_new_device(child_device.clone())?;
+
+        Ok(())
+    }
+
+    fn set_feature(device: &Arc<RwLock<USBDevice>>, port: u8, feature: u8) -> USBResult<()> {
         USBHost::<H>::device_control_transfer(&device, ControlCommand {
             request_type: request_type!(HostToDevice, Class, Other),
             request: REQUEST_SET_FEATURE,
@@ -426,10 +444,10 @@ impl<H: HAL2> HubDriver<H> {
             index: port as u16,
             length: 0,
             buffer: TransferBuffer::None,
-        });
+        })
     }
 
-    fn clear_feature(device: &Arc<RwLock<USBDevice>>, port: u8, feature: u8) {
+    fn clear_feature(device: &Arc<RwLock<USBDevice>>, port: u8, feature: u8) -> USBResult<()> {
         USBHost::<H>::device_control_transfer(&device, ControlCommand {
             request_type: request_type!(HostToDevice, Class, Other),
             request: REQUEST_CLEAR_FEATURE,
@@ -437,10 +455,10 @@ impl<H: HAL2> HubDriver<H> {
             index: port as u16,
             length: 0,
             buffer: TransferBuffer::None,
-        });
+        })
     }
 
-    fn fetch_port_status(device: &Arc<RwLock<USBDevice>>, port: u8) -> PortStatus {
+    fn fetch_port_status(device: &Arc<RwLock<USBDevice>>, port: u8) -> USBResult<PortStatus> {
         let mut status = PortStatus::default();
         USBHost::<H>::device_control_transfer(&device, ControlCommand {
             request_type: request_type!(DeviceToHost, Class, Other),
@@ -449,19 +467,21 @@ impl<H: HAL2> HubDriver<H> {
             index: port as u16,
             length: 4,
             buffer: TransferBuffer::Read(as_mut_slice(&mut status)),
-        });
-        status
+        })?;
+        Ok(status)
     }
 
-    fn reset_port(device: &Arc<RwLock<USBDevice>>, port: u8) {
-        Self::set_feature(device, port, FEATURE_PORT_RESET);
+    fn reset_port(device: &Arc<RwLock<USBDevice>>, port: u8) -> USBResult<()> {
+        Self::set_feature(device, port, FEATURE_PORT_RESET)?;
 
-        H::wait_until("failed to reset port", PORT_RESET_TIMEOUT, || {
-            let status = Self::fetch_port_status(device, port);
-            status.get_change_reset()
-        }).unwrap_or_else(|e| panic!("{:?}", e));
+        H::wait_until(USBErrorKind::Timeout.msg("failed to reset port"), PORT_RESET_TIMEOUT, || {
+            match Self::fetch_port_status(device, port) {
+                Ok(s) => s.get_change_reset(),
+                Err(_) => false,
+            }
+        })?;
 
-        Self::clear_feature(device, port, FEATURE_C_PORT_RESET);
+        Self::clear_feature(device, port, FEATURE_C_PORT_RESET)
     }
 }
 
@@ -470,20 +490,19 @@ pub struct HIDDriver<H: HAL2> {
 }
 
 impl<H: HAL2> HIDDriver<H> {
-    pub fn probe(device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptorSet) {
+    pub fn probe(device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptorSet) -> USBResult<()> {
         if interface.interface.bInterfaceSubClass != 1 {
             debug!("Skipping non bios-mode HID device");
-            return;
+            return Ok(());
         }
 
         if interface.interface.bInterfaceProtocol != 1 {
             debug!("Skipping non keyboard");
-            return;
+            return Ok(());
         }
 
         if interface.endpoints.len() == 0 {
-            warn!("keyboard with no endpoints!");
-            return;
+            return USBErrorKind::InvalidDescriptor.err("keyboard with no endpoints!");
         }
 
         let ep_interrupt = interface.endpoints.iter()
@@ -491,8 +510,7 @@ impl<H: HAL2> HIDDriver<H> {
         let ep_interrupt = match ep_interrupt {
             Some(e) => e,
             None => {
-                warn!("keyboard with no interrupt in endpoint");
-                return;
+                return USBErrorKind::InvalidDescriptor.err("keyboard with no interrupt in endpoint");
             }
         };
 
@@ -508,17 +526,17 @@ impl<H: HAL2> HIDDriver<H> {
         H::sleep(Duration::from_millis(100));
 
         debug!("set hid idle");
-        Self::set_hid_idle(device);
+        Self::set_hid_idle(device)?;
 
         // 0 is Boot Protocol
         debug!("set hid protocol");
-        Self::set_hid_protocol(device, 0);
+        Self::set_hid_protocol(device, 0)?;
 
         let pipe = pipe.read();
 
         for i in 0..1000 {
             debug!("set hid report");
-            Self::set_hid_report(device, &interface.interface, if i % 2 == 0 { 0 } else { 0xFF });
+            Self::set_hid_report(device, &interface.interface, if i % 2 == 0 { 0 } else { 0xFF })?;
 
             debug!("fetch hid report");
             let mut buf = Box::new([0u8; 128]);
@@ -532,12 +550,12 @@ impl<H: HAL2> HIDDriver<H> {
             }
 
             H::sleep(Duration::from_millis(500));
-
         }
 
+        Ok(())
     }
 
-    fn set_hid_report(device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptor, value: u8) {
+    fn set_hid_report(device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptor, value: u8) -> USBResult<()> {
         // type == 2 (Output)
         let (desc_type, desc_index) = (2, 0);
         USBHost::<H>::device_control_transfer(device, ControlCommand {
@@ -550,7 +568,7 @@ impl<H: HAL2> HIDDriver<H> {
         })
     }
 
-    fn set_hid_idle(device: &Arc<RwLock<USBDevice>>) {
+    fn set_hid_idle(device: &Arc<RwLock<USBDevice>>) -> USBResult<()> {
         USBHost::<H>::device_control_transfer(device, ControlCommand {
             request_type: request_type!(HostToDevice, Class, Interface),
             request: REQUEST_SET_IDLE,
@@ -561,7 +579,7 @@ impl<H: HAL2> HIDDriver<H> {
         })
     }
 
-    fn set_hid_protocol(device: &Arc<RwLock<USBDevice>>, value: u8) {
+    fn set_hid_protocol(device: &Arc<RwLock<USBDevice>>, value: u8) -> USBResult<()> {
         USBHost::<H>::device_control_transfer(device, ControlCommand {
             request_type: request_type!(HostToDevice, Class, Interface),
             request: REQUEST_SET_PROTOCOL,
@@ -571,7 +589,6 @@ impl<H: HAL2> HIDDriver<H> {
             buffer: TransferBuffer::None,
         })
     }
-
 }
 
 pub struct MassStorageDriver<H: HAL2> {
@@ -579,20 +596,19 @@ pub struct MassStorageDriver<H: HAL2> {
 }
 
 impl<H: HAL2> MassStorageDriver<H> {
-    pub fn probe(device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptorSet) {
+    pub fn probe(device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptorSet) -> USBResult<()> {
         if interface.interface.bInterfaceSubClass != 0x6 {
             debug!("Skipping MSD with sub-class other than 0x6 (Transparent SCSI)");
-            return;
+            return Ok(());
         }
 
         if interface.interface.bInterfaceProtocol != 0x50 {
             debug!("Skipping MSD with protocol other than bulk-only");
-            return;
+            return Ok(());
         }
 
         if interface.endpoints.len() < 2 {
-            warn!("MSD has not enough endpoints!");
-            return;
+            return USBErrorKind::InvalidDescriptor.err("MSD has not enough endpoints!");
         }
 
         debug!("acquiring locks");
@@ -604,13 +620,13 @@ impl<H: HAL2> MassStorageDriver<H> {
         let mut output_ep: Option<Arc<RwLock<USBPipe>>> = None;
 
         for endpoint in interface.endpoints.iter() {
-            if endpoint.bmAttributes != EP_ATTR_BULK {
+            if !matches!(endpoint.transfer_type(), EndpointType::Bulk) {
                 continue;
             }
 
             debug!("opening pipe: {}", endpoint.bEndpointAddress);
 
-            let pipe = bus_lock.controller.pipe_open(device, Some(endpoint)).unwrap_or_else(|e| panic!("failed to open endpoint"));
+            let pipe = bus_lock.controller.pipe_open(device, Some(endpoint))?;
 
             if endpoint.is_input() {
                 input_ep = Some(pipe);
@@ -619,8 +635,8 @@ impl<H: HAL2> MassStorageDriver<H> {
             }
         }
 
-        let input_ep = input_ep.ok_or(Error::Str("MSD has no bulk input endpoint")).unwrap_or_else(|e| panic!("{:?}", e));
-        let output_ep = output_ep.ok_or(Error::Str("MSD has no bulk output endpoint")).unwrap_or_else(|e| panic!("{:?}", e));
+        let input_ep = input_ep.ok_or(USBErrorKind::InvalidState.msg("MSD has no bulk input endpoint"))?;
+        let output_ep = output_ep.ok_or(USBErrorKind::InvalidState.msg("MSD has no bulk output endpoint"))?;
 
         debug!("locking endpoints");
 
@@ -633,24 +649,25 @@ impl<H: HAL2> MassStorageDriver<H> {
         let t = [0x55, 0x53, 0x42, 0x43, 0x13, 0x37, 0x04, 0x20, 0x24, 0x00, 0x00, 0x00, 0x80, 0x00, 6, 0x12, 0x00, 0x00, 0x00, 0x24, 0x00];
         (&mut buf[..t.len()]).copy_from_slice(&t);
 
-        let r = output_lock.bulk_write(buf.as_slice());
+        let r = output_lock.bulk_write(buf.as_slice())?;
         info!("Transfer Result: {:?}", r);
 
         let mut buf: Vec<u8> = Vec::new();
         buf.resize(36, 0);
 
-        let r = input_lock.bulk_read(buf.as_mut_slice());
+        let r = input_lock.bulk_read(buf.as_mut_slice())?;
         info!("Transfer Result: {:?}", r);
         info!("Got: {:x?}", buf.as_slice());
 
         let mut buf: Vec<u8> = Vec::new();
         buf.resize(13, 0);
 
-        let r = input_lock.bulk_read(buf.as_mut_slice());
+        let r = input_lock.bulk_read(buf.as_mut_slice())?;
         info!("Transfer Result: {:?}", r);
         info!("Got: {:x?}", buf.as_slice());
 
         H::sleep(Duration::from_secs(5));
+        Ok(())
     }
 }
 

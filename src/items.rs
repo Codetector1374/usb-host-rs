@@ -1,60 +1,18 @@
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::fmt;
 
-#[derive(Clone, Debug, Default)]
-pub struct Port {
-    pub port_id: u8,
-    pub slot_id: u8,
-    pub parent: Option<Box<Port>>,
-    pub is_low_or_full_speed: bool,
-}
+use modular_bitfield::prelude::*;
+use spin::RwLock;
 
-impl Port {
-    pub fn new_from_root(port_id: u8) -> Self {
-        Port {
-            port_id,
-            slot_id: 0,
-            parent: None,
-            is_low_or_full_speed: false,
-        }
-    }
-
-    pub fn child_port(&self, port_id: u8) -> Self {
-        Port {
-            port_id,
-            slot_id: 0,
-            parent: Some(Box::new(self.clone())),
-            is_low_or_full_speed: false,
-        }
-    }
-
-    pub fn get_root_port_id(&self) -> u8 {
-        match &self.parent {
-            None => self.port_id,
-            Some(parent) => parent.get_root_port_id(),
-        }
-    }
-
-    pub fn construct_route_string(&self) -> u32 {
-        let mut string = 0u32;
-        let mut me = self;
-        loop {
-            match &me.parent {
-                Some(p) => {
-                    string <<= 4;
-                    string |= me.port_id as u32;
-                    me = p.as_ref();
-                }
-                None => return string,
-            }
-        }
-    }
-}
+use crate::consts::USBSpeed;
+use crate::structs::USBDevice;
+use crate::traits::USBHostController;
 
 pub enum TransferBuffer<'a> {
     Read(&'a mut [u8]),
     Write(&'a [u8]),
-    None
+    None,
 }
 
 impl<'a> TransferBuffer<'a> {
@@ -138,18 +96,6 @@ pub enum EndpointType {
     Interrupt,
 }
 
-#[derive(Clone, Debug)]
-pub enum Error {
-    Str(&'static str),
-}
-
-/*
-fn send_control_command(&mut self, slot_id: u8, request_type: TypeTriple, request: u8,
-                            value: u16, index: u16, length: u16,
-                            write_to_usb: Option<&[u8]>, read_from_usb: Option<&mut [u8]>)
-                            -> Result<usize, Error>
- */
-
 #[derive(Debug)]
 pub struct ControlCommand<'a> {
     pub request_type: TypeTriple,
@@ -159,3 +105,42 @@ pub struct ControlCommand<'a> {
     pub length: u16,
     pub buffer: TransferBuffer<'a>,
 }
+
+#[bitfield]
+#[derive(Debug, Clone, Default)]
+pub struct PortStatus {
+    device_connected: bool,
+    port_enable: bool,
+    suspend: bool,
+    over_current: bool,
+    reset: bool,
+    __res0: B3,
+    port_power: bool,
+    low_speed: bool,
+    // low speed bit takes precedence over high speed bit
+    high_speed: bool,
+    port_test: bool,
+    port_indicator: bool,
+    __res1: B3,
+    change_device_connected: bool,
+    change_port_enable: bool,
+    change_suspend: bool,
+    change_over_current: bool,
+    change_reset: bool,
+    __res2: B11,
+}
+
+const_assert_size!(PortStatus, 4);
+
+impl PortStatus {
+    pub fn get_speed(&self) -> USBSpeed {
+        if self.get_low_speed() {
+            USBSpeed::Low
+        } else if self.get_high_speed() {
+            USBSpeed::High
+        } else {
+            USBSpeed::Full
+        }
+    }
+}
+

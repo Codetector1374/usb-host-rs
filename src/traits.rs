@@ -1,64 +1,32 @@
 use alloc::sync::Arc;
 
+use downcast_rs::DowncastSync;
 use spin::RwLock;
 
-use crate::items::{Port, EndpointType, Error, ControlCommand, TransferBuffer};
-use crate::structs::USBDevice;
-use downcast_rs::DowncastSync;
 use crate::descriptor::USBEndpointDescriptor;
-use crate::error::USBError;
+use crate::error::{USBErrorKind, USBError};
+use crate::items::{ControlCommand, EndpointType, TransferBuffer};
+use crate::structs::{USBDevice, USBPipe};
+use crate::USBResult;
 
-pub trait USBMeta : DowncastSync {}
+pub trait USBMeta: DowncastSync {}
 impl_downcast!(USBMeta);
 
-pub struct USBPipe {
-    pub device: Arc<RwLock<USBDevice>>,
-    pub controller: Arc<dyn USBHostController>,
-    pub index: u8,
-    pub endpoint_type: EndpointType,
-
-    // true for control endpoints but control endpoints are bidirectional
-    pub is_input: bool,
-}
-
-impl USBPipe {
-
-    pub fn control_transfer(&self, command: ControlCommand) {
-        assert!(matches!(self.endpoint_type, EndpointType::Control));
-        self.controller.control_transfer(&self, command);
-    }
-
-    pub fn bulk_write(&self, buf: &[u8]) -> Result<usize, Error> {
-        assert!(matches!(self.endpoint_type, EndpointType::Bulk | EndpointType::Interrupt));
-        assert!(!self.is_input);
-        self.controller.bulk_transfer(&self, TransferBuffer::Write(buf))
-    }
-
-    pub fn bulk_read(&self, buf: &mut [u8]) -> Result<usize, Error> {
-        assert!(matches!(self.endpoint_type, EndpointType::Bulk | EndpointType::Interrupt));
-        assert!(self.is_input);
-        self.controller.bulk_transfer(&self, TransferBuffer::Read(buf))
-    }
-
-}
-
 pub trait USBHostController: Send + Sync {
-
     fn register_root_hub(&self, device: &Arc<RwLock<USBDevice>>);
 
-    fn pipe_open(&self, device: &Arc<RwLock<USBDevice>>, endpoint: Option<&USBEndpointDescriptor>) -> Result<Arc<RwLock<USBPipe>>, Error>;
+    fn pipe_open(&self, device: &Arc<RwLock<USBDevice>>, endpoint: Option<&USBEndpointDescriptor>) -> USBResult<Arc<RwLock<USBPipe>>>;
 
-    fn set_address(&self, device: &Arc<RwLock<USBDevice>>, addr: u32);
+    fn set_address(&self, device: &Arc<RwLock<USBDevice>>, addr: u32) -> USBResult<()>;
 
-    fn configure_hub(&self, device: &Arc<RwLock<USBDevice>>, nbr_ports: u8, ttt: u8) -> Result<(), USBError>;
+    fn configure_hub(&self, device: &Arc<RwLock<USBDevice>>, nbr_ports: u8, ttt: u8) -> USBResult<()>;
 
-    fn control_transfer(&self, endpoint: &USBPipe, command: ControlCommand);
+    fn control_transfer(&self, endpoint: &USBPipe, command: ControlCommand) -> USBResult<()>;
 
-    fn bulk_transfer(&self, endpoint: &USBPipe, buffer: TransferBuffer) -> Result<usize, Error>;
+    fn bulk_transfer(&self, endpoint: &USBPipe, buffer: TransferBuffer) -> USBResult<usize>;
 
-    fn allocate_slot(&self) -> u8;
+    fn allocate_slot(&self) -> USBResult<u8>;
 
     fn free_slot(&self, slot: u8);
-
 }
 

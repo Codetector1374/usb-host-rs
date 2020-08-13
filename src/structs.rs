@@ -6,12 +6,13 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use hashbrown::HashMap;
-use modular_bitfield::prelude::*;
 use spin::{Mutex, RwLock};
 
 use crate::consts::{DESCRIPTOR_TYPE_ENDPOINT, USBSpeed};
-use crate::descriptor::{USBDeviceDescriptor, USBEndpointDescriptor, USBConfigurationDescriptor, USBConfigurationDescriptorSet};
-use crate::traits::{USBHostController, USBMeta, USBPipe};
+use crate::descriptor::{USBConfigurationDescriptor, USBConfigurationDescriptorSet, USBDeviceDescriptor, USBEndpointDescriptor};
+use crate::items::{ControlCommand, EndpointType, TransferBuffer};
+use crate::{items, error};
+use crate::traits::{USBHostController, USBMeta};
 
 /// Describes a Generic USB Device
 pub struct USBDevice {
@@ -99,41 +100,33 @@ impl USBEndpoint {
     }
 }
 
-#[bitfield]
-#[derive(Debug, Clone, Default)]
-pub struct PortStatus {
-    device_connected: bool,
-    port_enable: bool,
-    suspend: bool,
-    over_current: bool,
-    reset: bool,
-    __res0: B3,
-    port_power: bool,
-    low_speed: bool,
-    // low speed bit takes precedence over high speed bit
-    high_speed: bool,
-    port_test: bool,
-    port_indicator: bool,
-    __res1: B3,
-    change_device_connected: bool,
-    change_port_enable: bool,
-    change_suspend: bool,
-    change_over_current: bool,
-    change_reset: bool,
-    __res2: B11,
+
+pub struct USBPipe {
+    pub device: Arc<RwLock<USBDevice>>,
+    pub controller: Arc<dyn USBHostController>,
+    pub index: u8,
+    pub endpoint_type: EndpointType,
+
+    // true for control endpoints but control endpoints are bidirectional
+    pub is_input: bool,
 }
 
-const_assert_size!(PortStatus, 4);
+impl USBPipe {
+    pub fn control_transfer(&self, command: ControlCommand) {
+        assert!(matches!(self.endpoint_type, EndpointType::Control));
+        self.controller.control_transfer(&self, command);
+    }
 
-impl PortStatus {
-    pub fn get_speed(&self) -> USBSpeed {
-        if self.get_low_speed() {
-            USBSpeed::Low
-        } else if self.get_high_speed() {
-            USBSpeed::High
-        } else {
-            USBSpeed::Full
-        }
+    pub fn bulk_write(&self, buf: &[u8]) -> Result<usize, error::USBError> {
+        assert!(matches!(self.endpoint_type, EndpointType::Bulk | EndpointType::Interrupt));
+        assert!(!self.is_input);
+        self.controller.bulk_transfer(&self, TransferBuffer::Write(buf))
+    }
+
+    pub fn bulk_read(&self, buf: &mut [u8]) -> Result<usize, error::USBError> {
+        assert!(matches!(self.endpoint_type, EndpointType::Bulk | EndpointType::Interrupt));
+        assert!(self.is_input);
+        self.controller.bulk_transfer(&self, TransferBuffer::Read(buf))
     }
 }
 
