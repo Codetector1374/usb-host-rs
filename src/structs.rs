@@ -11,11 +11,13 @@ use spin::{Mutex, RwLock};
 use crate::consts::{DESCRIPTOR_TYPE_ENDPOINT, USBSpeed};
 use crate::descriptor::{USBConfigurationDescriptor, USBConfigurationDescriptorSet, USBDeviceDescriptor, USBEndpointDescriptor};
 use crate::items::{ControlCommand, EndpointType, TransferBuffer};
-use crate::{items, error};
-use crate::traits::{USBHostController, USBMeta};
+use crate::{items, error, USBResult};
+use crate::traits::{USBHostController, USBMeta, USBAsyncReadFn};
 use downcast_rs::DowncastSync;
 
 pub trait USBDeviceDriver: DowncastSync {
+
+    fn on_disconnect(&self) {}
 
 }
 
@@ -24,7 +26,8 @@ impl_downcast!(sync USBDeviceDriver);
 pub enum DeviceState {
     Unconfigured,
     Idle,
-    Owned(Arc<dyn USBDeviceDriver>)
+    Owned(Arc<dyn USBDeviceDriver>),
+    Disconnected,
 }
 
 /// Describes a Generic USB Device
@@ -126,16 +129,20 @@ impl USBPipe {
         self.controller.control_transfer(&self, command);
     }
 
-    pub fn bulk_write(&self, buf: &[u8]) -> Result<usize, error::USBError> {
-        assert!(matches!(self.endpoint_type, EndpointType::Bulk | EndpointType::Interrupt));
+    pub fn bulk_write(&self, buf: &[u8]) -> USBResult<usize> {
+        assert!(matches!(self.endpoint_type, EndpointType::Bulk));
         assert!(!self.is_input);
         self.controller.bulk_transfer(&self, TransferBuffer::Write(buf))
     }
 
-    pub fn bulk_read(&self, buf: &mut [u8]) -> Result<usize, error::USBError> {
-        assert!(matches!(self.endpoint_type, EndpointType::Bulk | EndpointType::Interrupt));
+    pub fn bulk_read(&self, buf: &mut [u8]) -> USBResult<usize> {
+        assert!(matches!(self.endpoint_type, EndpointType::Bulk));
         assert!(self.is_input);
         self.controller.bulk_transfer(&self, TransferBuffer::Read(buf))
+    }
+
+    pub fn async_read(&self, buf: Vec<u8>, int_callback: USBAsyncReadFn) -> USBResult<()> {
+        self.controller.async_read(&self, buf, int_callback)
     }
 }
 

@@ -1,16 +1,20 @@
+use alloc::boxed::Box;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use downcast_rs::DowncastSync;
 use spin::RwLock;
 
 use crate::descriptor::USBEndpointDescriptor;
-use crate::error::{USBErrorKind, USBError};
+use crate::error::{USBError, USBErrorKind};
 use crate::items::{ControlCommand, EndpointType, TransferBuffer};
 use crate::structs::{USBDevice, USBPipe};
 use crate::USBResult;
 
 pub trait USBMeta: DowncastSync {}
 impl_downcast!(USBMeta);
+
+pub type USBAsyncReadFn = Box<dyn FnOnce(Vec<u8>, USBResult<usize>) + Send>;
 
 pub trait USBHostController: Send + Sync {
     fn register_root_hub(&self, device: &Arc<RwLock<USBDevice>>);
@@ -25,8 +29,13 @@ pub trait USBHostController: Send + Sync {
 
     fn bulk_transfer(&self, endpoint: &USBPipe, buffer: TransferBuffer) -> USBResult<usize>;
 
+    fn async_read(&self, endpoint: &USBPipe, buf: Vec<u8>, int_callback: USBAsyncReadFn) -> USBResult<()>;
+
     fn allocate_slot(&self) -> USBResult<u8>;
 
     fn free_slot(&self, slot: u8);
+
+    fn process_interrupts(&self);
+
 }
 

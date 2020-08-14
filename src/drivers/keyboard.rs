@@ -1,23 +1,31 @@
+use alloc::boxed::Box;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::time::Duration;
 
 use spin::RwLock;
 
-use crate::{UsbHAL, USBErrorKind, USBHost, USBResult};
+use crate::{USBErrorKind, UsbHAL, USBHost, USBResult};
 use crate::consts::*;
 use crate::descriptor::{USBInterfaceDescriptor, USBInterfaceDescriptorSet};
-use crate::items::{ControlCommand, TransferBuffer, EndpointType};
-use crate::structs::{USBDevice, USBPipe};
+use crate::items::{ControlCommand, EndpointType, TransferBuffer};
+use crate::structs::{USBDevice, USBDeviceDriver, USBPipe, DeviceState};
 
 pub struct HIDKeyboard<H: UsbHAL> {
     __phantom: PhantomData<H>,
-    device: Arc<RwLock<USBDevice>>,
-    pipe: Arc<RwLock<USBPipe>>,
+    // device: Arc<RwLock<USBDevice>>,
+    // pipe: Arc<RwLock<USBPipe>>,
 }
+
+impl<H: UsbHAL> USBDeviceDriver for HIDKeyboard<H> {}
 
 impl<H: UsbHAL> HIDKeyboard<H> {
     pub fn probe(device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptorSet) -> USBResult<()> {
+        if interface.interface.bInterfaceClass != CLASS_CODE_HID {
+            return Ok(());
+        }
+
         if interface.interface.bInterfaceSubClass != 1 {
             debug!("Skipping non bios-mode HID device");
             return Ok(());
@@ -41,6 +49,11 @@ impl<H: UsbHAL> HIDKeyboard<H> {
             }
         };
 
+        {
+            let mut d = device.write();
+            d.device_state = DeviceState::Owned(Arc::new(HIDKeyboard::<H> { __phantom: PhantomData::default() }))
+        }
+
         // Enable keyboard
 
         let dev_lock = device.read();
@@ -58,6 +71,15 @@ impl<H: UsbHAL> HIDKeyboard<H> {
         // 0 is Boot Protocol
         debug!("set hid protocol");
         Self::set_hid_protocol(device, 0)?;
+
+
+        for _ in 0..20 {
+            let cloned = pipe.clone();
+            let mut buf = Vec::new();
+            buf.reserve_exact(512);
+            buf.resize(8, 0);
+            Self::register_callback(cloned, buf);
+        }
 
         // let pipe = pipe.read();
         //
@@ -80,6 +102,22 @@ impl<H: UsbHAL> HIDKeyboard<H> {
         // }
 
         Ok(())
+    }
+
+    fn register_callback(pipe: Arc<RwLock<USBPipe>>, buf: Vec<u8>) {
+        let cloned_pipe = pipe.clone();
+        let pip = pipe.read();
+        let res = pip.async_read(buf, Box::new(move |res_buf, result| {
+            match result {
+                Ok(_) => info!("got interrupt: {:?}", res_buf.as_slice()),
+                Err(e) => warn!("failed async read: {:?}", e),
+            }
+
+            Self::register_callback(cloned_pipe, res_buf);
+        }));
+        if let Err(e) = res {
+            warn!("failed to queue async read: {:?}", e);
+        }
     }
 
     fn set_hid_report(device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptor, value: u8) -> USBResult<()> {
