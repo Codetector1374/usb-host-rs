@@ -26,7 +26,7 @@ use crate::consts::*;
 use crate::descriptor::*;
 pub use crate::error::{USBError, USBErrorKind, USBResult};
 use crate::items::{ControlCommand, EndpointType, PortStatus, Recipient, RequestType, TransferBuffer, TransferDirection, TypeTriple};
-use crate::structs::{USBBus, USBDevice, USBPipe};
+use crate::structs::{USBBus, USBDevice, USBPipe, DeviceState};
 use crate::traits::USBHostController;
 use crate::drivers::mass_storage::MassStorageDriver;
 use crate::drivers::keyboard::HIDKeyboard;
@@ -36,7 +36,7 @@ pub mod macros;
 
 pub mod consts;
 pub mod descriptor;
-mod drivers;
+pub mod drivers;
 mod error;
 pub mod items;
 pub mod structs;
@@ -51,7 +51,7 @@ pub(crate) fn as_slice<T>(t: &T) -> &[u8] {
     unsafe { core::slice::from_raw_parts(t as *const T as *const u8, core::mem::size_of::<T>()) }
 }
 
-pub trait UsbHAL {
+pub trait UsbHAL: Sync + Send + 'static {
     fn sleep(dur: Duration);
 
     fn current_time() -> Duration;
@@ -70,20 +70,29 @@ pub trait UsbHAL {
     }
 }
 
+pub trait HostCallbacks<H: UsbHAL>: Sync {
+    fn new_device(&self, host: &Arc<USBHost<H>>, device: &Arc<RwLock<USBDevice>>) -> USBResult<()> {
+        Ok(())
+    }
+
+}
+
 
 pub struct USBHost<H: UsbHAL> {
     count: u32,
-    root_hubs: HashMap<u32, Arc<RwLock<USBBus>>>,
+    root_hubs: RwLock<HashMap<u32, Arc<RwLock<USBBus>>>>,
     __phantom: PhantomData<H>,
+    callbacks: Arc<dyn HostCallbacks<H>>,
 }
 
 
 impl<H: UsbHAL> USBHost<H> {
-    pub fn new() -> Self {
+    pub fn new(callbacks: Arc<dyn HostCallbacks<H>>) -> Self {
         Self {
             count: 0,
-            root_hubs: HashMap::new(),
+            root_hubs: RwLock::new(HashMap::new()),
             __phantom: PhantomData::default(),
+            callbacks,
         }
     }
 
@@ -100,7 +109,10 @@ impl<H: UsbHAL> USBHost<H> {
         }
 
         let count = self.count;
-        self.root_hubs.insert(count, bus.clone());
+        {
+            let mut r = self.root_hubs.write();
+            r.insert(count, bus.clone());
+        }
         self.count = count + 1;
 
         // open the control "endpoint" on the root hub.
@@ -139,7 +151,7 @@ impl<H: UsbHAL> USBHost<H> {
         Ok(Arc::new(RwLock::new(dev)))
     }
 
-    fn device_control_transfer(device: &Arc<RwLock<USBDevice>>, command: ControlCommand) -> USBResult<()> {
+    pub fn device_control_transfer(device: &Arc<RwLock<USBDevice>>, command: ControlCommand) -> USBResult<()> {
         // TODO refactor to store endpoint in the USBDevice then use the existing Control endpoint instead of making a fake one here.
         let cloned_device = device.clone();
 
@@ -152,13 +164,14 @@ impl<H: UsbHAL> USBHost<H> {
             controller: bus_lock.controller.clone(),
             index: 0,
             endpoint_type: EndpointType::Control,
+            max_packet_size: dev_lock.ddesc.get_max_packet_size() as usize,
             is_input: true,
         };
 
         bus_lock.controller.control_transfer(&control_endpoint, command)
     }
 
-    fn fetch_descriptor_slice(device: &Arc<RwLock<USBDevice>>, req_type: RequestType, desc_type: u8, desc_index: u8, w_index: u16, slice: &mut [u8]) -> USBResult<()> {
+    pub fn fetch_descriptor_slice(device: &Arc<RwLock<USBDevice>>, req_type: RequestType, desc_type: u8, desc_index: u8, w_index: u16, slice: &mut [u8]) -> USBResult<()> {
         Self::device_control_transfer(device, ControlCommand {
             request_type: TypeTriple(TransferDirection::DeviceToHost, req_type, Recipient::Device),
             request: REQUEST_GET_DESCRIPTOR,
@@ -169,11 +182,11 @@ impl<H: UsbHAL> USBHost<H> {
         })
     }
 
-    fn fetch_descriptor<T>(device: &Arc<RwLock<USBDevice>>, req_type: RequestType, desc_type: u8, desc_index: u8, w_index: u16, buf: &mut T) -> USBResult<()> {
+    pub fn fetch_descriptor<T>(device: &Arc<RwLock<USBDevice>>, req_type: RequestType, desc_type: u8, desc_index: u8, w_index: u16, buf: &mut T) -> USBResult<()> {
         Self::fetch_descriptor_slice(device, req_type, desc_type, desc_index, w_index, as_mut_slice(buf))
     }
 
-    fn fetch_configuration_descriptor(device: &Arc<RwLock<USBDevice>>) -> Result<USBConfigurationDescriptorSet, USBError> {
+    pub fn fetch_configuration_descriptor(device: &Arc<RwLock<USBDevice>>) -> Result<USBConfigurationDescriptorSet, USBError> {
         let mut config_descriptor = USBConfigurationDescriptor::default();
         Self::fetch_descriptor_slice(device, RequestType::Standard, DESCRIPTOR_TYPE_CONFIGURATION, 0, 0, &mut as_mut_slice(&mut config_descriptor)[..4]);
 
@@ -239,7 +252,7 @@ impl<H: UsbHAL> USBHost<H> {
         Ok(USBConfigurationDescriptorSet { config: config_descriptor, ifsets: interfaces })
     }
 
-    fn fetch_string_descriptor(device: &Arc<RwLock<USBDevice>>, index: u8, lang: u16) -> Result<String, USBError> {
+    pub fn fetch_string_descriptor(device: &Arc<RwLock<USBDevice>>, index: u8, lang: u16) -> Result<String, USBError> {
         if index == 0 {
             return USBErrorKind::InvalidArgument.err("invalid descriptor index 0");
         }
@@ -257,7 +270,7 @@ impl<H: UsbHAL> USBHost<H> {
         Ok(String::from_utf16_lossy(&buf2[1..]))
     }
 
-    pub fn setup_new_device(device: Arc<RwLock<USBDevice>>) -> USBResult<()> {
+    pub fn setup_new_device(host: &Arc<Self>, device: Arc<RwLock<USBDevice>>) -> USBResult<()> {
         let mut device_desc = USBDeviceDescriptor::default();
         Self::fetch_descriptor(&device, RequestType::Standard, DESCRIPTOR_TYPE_DEVICE, 0, 0, &mut device_desc);
 
@@ -268,6 +281,7 @@ impl<H: UsbHAL> USBHost<H> {
 
         {
             let mut dev_lock = device.write();
+            dev_lock.ddesc = device_desc;
             dev_lock.config_desc = Some(configuration.clone());
         }
 
@@ -282,6 +296,16 @@ impl<H: UsbHAL> USBHost<H> {
 
         debug!("Applied Config {}", configuration.config.bConfigurationValue);
         H::sleep(Duration::from_millis(10));
+
+        {
+            let dev_cloned = device.clone();
+            let mut dev_lock = device.write();
+            dev_lock.device_state = DeviceState::Idle;
+            let mut bus_lock = dev_lock.bus.write();
+            bus_lock.devices[dev_lock.addr as usize] = Some(dev_cloned);
+        }
+
+        host.callbacks.new_device(host, &device);
 
         // Fetching language is removed due to various issues and most OS doesn't do it.
         // let mut buf = [0u8; 2];
@@ -298,35 +322,35 @@ impl<H: UsbHAL> USBHost<H> {
         // debug!("Language code: {:#x}", lang);
 
         // Display things
-        let mfg = Self::fetch_string_descriptor(&device, device_desc.iManufacturer, 0x409).unwrap_or(String::from("(no manufacturer name)"));
-        let prd = Self::fetch_string_descriptor(&device, device_desc.iProduct, 0x409).unwrap_or(String::from("(no product name)"));
-        let serial = Self::fetch_string_descriptor(&device, device_desc.iSerialNumber, 0x409).unwrap_or(String::from("(no serial number)"));
-        debug!("[XHCI] New device:\n  MFG: {}\n  Prd:{}\n  Serial:{}", mfg, prd, serial);
-
-        for interface in &configuration.ifsets {
-            if interface.interface.bAlternateSetting != 0 {
-                debug!("Skipping non-default altSetting Interface");
-                continue;
-            }
-            match interface.interface.bInterfaceClass {
-                CLASS_CODE_MASS => {
-                    if let Err(e) = MassStorageDriver::<H>::probe(&device, interface) {
-                        error!("failed to probe msd: {:?}", e);
-                    }
-                }
-                CLASS_CODE_HID => {
-                    if let Err(e) = HIDKeyboard::<H>::probe(&device, interface) {
-                        error!("failed to probe hid: {:?}", e);
-                    }
-                }
-                CLASS_CODE_HUB => {
-                    if let Err(e) = HubDriver::<H>::probe(&device, interface) {
-                        error!("failed to probe hub: {:?}", e);
-                    }
-                }
-                _ => {}
-            }
-        }
+        // let mfg = Self::fetch_string_descriptor(&device, device_desc.iManufacturer, 0x409).unwrap_or(String::from("(no manufacturer name)"));
+        // let prd = Self::fetch_string_descriptor(&device, device_desc.iProduct, 0x409).unwrap_or(String::from("(no product name)"));
+        // let serial = Self::fetch_string_descriptor(&device, device_desc.iSerialNumber, 0x409).unwrap_or(String::from("(no serial number)"));
+        // debug!("[XHCI] New device:\n  MFG: {}\n  Prd:{}\n  Serial:{}", mfg, prd, serial);
+        //
+        // for interface in &configuration.ifsets {
+        //     if interface.interface.bAlternateSetting != 0 {
+        //         debug!("Skipping non-default altSetting Interface");
+        //         continue;
+        //     }
+        //     match interface.interface.bInterfaceClass {
+        //         CLASS_CODE_MASS => {
+        //             if let Err(e) = MassStorageDriver::<H>::probe(&device, interface) {
+        //                 error!("failed to probe msd: {:?}", e);
+        //             }
+        //         }
+        //         CLASS_CODE_HID => {
+        //             if let Err(e) = HIDKeyboard::<H>::probe(&device, interface) {
+        //                 error!("failed to probe hid: {:?}", e);
+        //             }
+        //         }
+        //         CLASS_CODE_HUB => {
+        //             if let Err(e) = HubDriver::<H>::probe(&device, interface) {
+        //                 error!("failed to probe hub: {:?}", e);
+        //             }
+        //         }
+        //         _ => {}
+        //     }
+        // }
 
         Ok(())
     }
@@ -348,145 +372,6 @@ impl<H: UsbHAL> USBHost<H> {
     }
 }
 
-pub struct HubDriver<H: UsbHAL> {
-    __phantom: PhantomData<H>,
-}
-
-impl<H: UsbHAL> HubDriver<H> {
-    pub fn probe(device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptorSet) -> USBResult<()> {
-        if interface.endpoints.len() == 0 {
-            warn!("Hub with no endpoints!");
-        }
-        if interface.endpoints.len() > 1 {
-            warn!("Hub with more than 1 endpoint!");
-        }
-
-        let mut hub_descriptor = USBHubDescriptor::default();
-        USBHost::<H>::fetch_descriptor(&device, RequestType::Class, DESCRIPTOR_TYPE_HUB, 0, 0, &mut hub_descriptor)?;
-        info!("Hub Descriptor: {:?}", hub_descriptor);
-
-        // Setup EPs
-        debug!("Found {} eps on this interface", interface.endpoints.len());
-
-        let controller = device.read().bus.read().controller.clone();
-        controller.configure_hub(&device, hub_descriptor.bNbrPorts, hub_descriptor.wHubCharacteristics.get_tt_think_time()).expect("Unable to configure hub");
-
-        // TODO: Potentially Configure the Interrupt EP for Hub (if there is one)
-
-        for num in 1..=hub_descriptor.bNbrPorts {
-            if let Err(e) = HubDriver::<H>::probe_port(device, &hub_descriptor, num) {
-                error!("failed to probe hub port {}: {:?}", num, e);
-            }
-        }
-
-        Ok(())
-    }
-
-    fn probe_port(device: &Arc<RwLock<USBDevice>>, hub_descriptor: &USBHubDescriptor, port: u8) -> USBResult<()> {
-        Self::set_feature(device, port, FEATURE_PORT_POWER)?;
-        H::sleep(Duration::from_millis(hub_descriptor.bPwrOn2PwrGood as u64 * 2));
-
-        Self::clear_feature(device, port, FEATURE_C_PORT_CONNECTION)?;
-        let mut status = Self::fetch_port_status(device, port)?;
-
-        debug!("Port {}: status={:?}", port, status);
-
-        if !status.get_device_connected() {
-            return Ok(());
-        }
-
-        debug!("Acquiring locks");
-
-        let child_parent_device = device.clone();
-
-        let dev_lock = device.read();
-
-        let child_bus = dev_lock.bus.clone();
-        let bus_lock = dev_lock.bus.read();
-        let slot = bus_lock.controller.allocate_slot()?;
-
-        debug!("creating new child device");
-
-        debug!("resetting device");
-        Self::reset_port(device, port)?;
-
-        let status = Self::fetch_port_status(device, port)?;
-
-        let child_device = USBHost::<H>::new_device(Some(child_parent_device), child_bus, status.get_speed(), slot as u32, port)?;
-
-        debug!("opening control pipe");
-        // open the control "endpoint" on the root hub.
-        bus_lock.controller.pipe_open(&child_device, None)?;
-
-        H::sleep(Duration::from_millis(10));
-        debug!("Going to fetch descriptor...");
-
-        let mut buf = [0u8; 8];
-        USBHost::<H>::fetch_descriptor_slice(&child_device, RequestType::Standard, DESCRIPTOR_TYPE_DEVICE, 0, 0, &mut buf)?;
-        debug!("First fetch descriptor: {:?}", buf);
-
-        {
-            let mut d = child_device.write();
-            d.ddesc.bMaxPacketSize = buf[7];
-        }
-
-        debug!("setting address");
-        bus_lock.controller.set_address(&child_device, slot as u32)?;
-
-        debug!("recursive setup_new_device()");
-        USBHost::<H>::setup_new_device(child_device.clone())?;
-
-        Ok(())
-    }
-
-    fn set_feature(device: &Arc<RwLock<USBDevice>>, port: u8, feature: u8) -> USBResult<()> {
-        USBHost::<H>::device_control_transfer(&device, ControlCommand {
-            request_type: request_type!(HostToDevice, Class, Other),
-            request: REQUEST_SET_FEATURE,
-            value: feature as u16,
-            index: port as u16,
-            length: 0,
-            buffer: TransferBuffer::None,
-        })
-    }
-
-    fn clear_feature(device: &Arc<RwLock<USBDevice>>, port: u8, feature: u8) -> USBResult<()> {
-        USBHost::<H>::device_control_transfer(&device, ControlCommand {
-            request_type: request_type!(HostToDevice, Class, Other),
-            request: REQUEST_CLEAR_FEATURE,
-            value: feature as u16,
-            index: port as u16,
-            length: 0,
-            buffer: TransferBuffer::None,
-        })
-    }
-
-    fn fetch_port_status(device: &Arc<RwLock<USBDevice>>, port: u8) -> USBResult<PortStatus> {
-        let mut status = PortStatus::default();
-        USBHost::<H>::device_control_transfer(&device, ControlCommand {
-            request_type: request_type!(DeviceToHost, Class, Other),
-            request: REQUEST_GET_STATUS,
-            value: 0,
-            index: port as u16,
-            length: 4,
-            buffer: TransferBuffer::Read(as_mut_slice(&mut status)),
-        })?;
-        Ok(status)
-    }
-
-    fn reset_port(device: &Arc<RwLock<USBDevice>>, port: u8) -> USBResult<()> {
-        Self::set_feature(device, port, FEATURE_PORT_RESET)?;
-
-        H::wait_until(USBErrorKind::Timeout.msg("failed to reset port"), PORT_RESET_TIMEOUT, || {
-            match Self::fetch_port_status(device, port) {
-                Ok(s) => s.get_change_reset(),
-                Err(_) => false,
-            }
-        })?;
-
-        Self::clear_feature(device, port, FEATURE_C_PORT_RESET)
-    }
-}
 
 
 

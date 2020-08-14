@@ -8,11 +8,13 @@ use spin::RwLock;
 
 use crate::{UsbHAL, USBErrorKind, USBResult, as_slice, as_mut_slice};
 use crate::descriptor::USBInterfaceDescriptorSet;
-use crate::structs::{USBDevice, USBPipe};
+use crate::structs::{USBDevice, USBPipe, DeviceState, USBDeviceDriver};
 use crate::items::{EndpointType, TransferBuffer};
+use crate::consts::CLASS_CODE_MASS;
 
-pub struct MassStorageDriver<H: UsbHAL> {
+pub struct MassStorageDriver<H: UsbHAL, C: MSDCallback> {
     __phantom: PhantomData<H>,
+    __phantomC: PhantomData<C>,
 }
 
 #[repr(C, packed)]
@@ -164,9 +166,9 @@ struct FormatCapacity {
 }
 
 #[derive(Debug, Clone)]
-struct Capacity {
-    block_count: u64,
-    block_length: u32,
+pub struct Capacity {
+    pub block_count: u64,
+    pub block_length: u32,
     lba_size: LbaSize,
 }
 
@@ -212,12 +214,11 @@ impl SCSIBuilder {
     }
 }
 
-struct TransparentSCSI {
+pub struct TransparentSCSI {
     bulk: BulkOnlyProtocol,
     inquiry: InquiryResponse,
     format_capacities: Vec<FormatCapacity>,
     capacity: Capacity,
-
 }
 
 fn read_u32(buf: &[u8], start: usize) -> u32 {
@@ -232,7 +233,7 @@ fn read_u64(buf: &[u8], start: usize) -> u64 {
 }
 
 impl TransparentSCSI {
-    pub fn new(bulk: BulkOnlyProtocol) -> USBResult<Self> {
+    fn new(bulk: BulkOnlyProtocol) -> USBResult<Self> {
 
         let mut inquiry = InquiryResponse::default();
         bulk.transfer(0, &[0x12, 0x00, 0x00, 0x00, 0x24, 0x00], TransferBuffer::Read(as_mut_slice(&mut inquiry)))?;
@@ -315,6 +316,10 @@ impl TransparentSCSI {
             lba_size: LbaSize::Size16,
         })
     }
+
+    pub fn get_capacity(&self) -> &Capacity {
+        &self.capacity
+    }
 }
 
 impl SimpleBlockDevice for TransparentSCSI {
@@ -372,10 +377,18 @@ impl SimpleBlockDevice for TransparentSCSI {
     }
 }
 
+pub trait MSDCallback: Sync + Send + 'static {
+    fn on_new_scsi(scsi: TransparentSCSI) -> USBResult<()> { Ok(()) }
+}
 
+impl<H: UsbHAL, C: MSDCallback> USBDeviceDriver for MassStorageDriver<H, C> {}
 
-impl<H: UsbHAL> MassStorageDriver<H> {
+impl<H: UsbHAL, C: MSDCallback> MassStorageDriver<H, C> {
     pub fn probe(device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptorSet) -> USBResult<()> {
+        if interface.interface.bInterfaceClass != CLASS_CODE_MASS {
+            return Ok(())
+        }
+
         if interface.interface.bInterfaceSubClass != 0x6 {
             debug!("Skipping MSD with sub-class other than 0x6 (Transparent SCSI)");
             return Ok(());
@@ -388,6 +401,14 @@ impl<H: UsbHAL> MassStorageDriver<H> {
 
         if interface.endpoints.len() < 2 {
             return USBErrorKind::InvalidDescriptor.err("MSD has not enough endpoints!");
+        }
+
+        {
+            let mut d = device.write();
+            d.device_state = DeviceState::Owned(Arc::new(MassStorageDriver::<H, C> {
+                __phantom: PhantomData::default(),
+                __phantomC: PhantomData::default(),
+            }))
         }
 
         debug!("acquiring locks");
@@ -429,6 +450,8 @@ impl<H: UsbHAL> MassStorageDriver<H> {
         scsi.read_sector(0, buf.as_mut_slice())?;
 
         info!("Fist 16 sectors:\n{}", pretty_hex::pretty_hex(&buf.as_slice()));
+
+        C::on_new_scsi(scsi);
 
         H::sleep(Duration::from_secs(5));
         Ok(())

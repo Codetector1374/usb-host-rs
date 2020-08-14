@@ -13,6 +13,19 @@ use crate::descriptor::{USBConfigurationDescriptor, USBConfigurationDescriptorSe
 use crate::items::{ControlCommand, EndpointType, TransferBuffer};
 use crate::{items, error};
 use crate::traits::{USBHostController, USBMeta};
+use downcast_rs::DowncastSync;
+
+pub trait USBDeviceDriver: DowncastSync {
+
+}
+
+impl_downcast!(sync USBDeviceDriver);
+
+pub enum DeviceState {
+    Unconfigured,
+    Idle,
+    Owned(Arc<dyn USBDeviceDriver>)
+}
 
 /// Describes a Generic USB Device
 pub struct USBDevice {
@@ -28,7 +41,9 @@ pub struct USBDevice {
     pub parent: Option<Arc<RwLock<USBDevice>>>,
     pub def_ep: USBEndpoint,
 
-    pub prv: Option<Box<dyn USBMeta>>,
+    pub device_state: DeviceState,
+    pub user_meta: Option<Box<dyn USBMeta>>,
+    pub protocol_meta: Option<Box<dyn USBMeta>>,
 }
 
 impl USBDevice {
@@ -44,7 +59,9 @@ impl USBDevice {
             langid: 0,
             ddesc: USBDeviceDescriptor::default(),
             def_ep: USBEndpoint::default_ep(max_packet_size),
-            prv: None,
+            device_state: DeviceState::Unconfigured,
+            user_meta: None,
+            protocol_meta: None,
         };
         device.ddesc.bMaxPacketSize = match max_packet_size {
             8 | 32 | 64 => max_packet_size as u8,
@@ -69,15 +86,6 @@ impl USBBus {
             controller,
             devices,
         }
-    }
-
-    pub fn get_new_addr(&self) -> Option<u32> {
-        for i in 0..self.devices.len() {
-            if self.devices[i].is_none() {
-                return Some(i as u32);
-            }
-        }
-        return None;
     }
 }
 
@@ -106,6 +114,7 @@ pub struct USBPipe {
     pub controller: Arc<dyn USBHostController>,
     pub index: u8,
     pub endpoint_type: EndpointType,
+    pub max_packet_size: usize,
 
     // true for control endpoints but control endpoints are bidirectional
     pub is_input: bool,

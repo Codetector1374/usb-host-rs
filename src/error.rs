@@ -6,6 +6,7 @@ pub enum USBErrorKind {
     NoFreeDeviceAddress,
     InvalidState,
     InvalidDescriptor,
+    NoDriver,
     Timeout
 }
 
