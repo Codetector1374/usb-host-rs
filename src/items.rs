@@ -88,7 +88,7 @@ impl Into<u8> for TypeTriple {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum EndpointType {
     Control,
     Isochronous,
@@ -107,7 +107,7 @@ pub struct ControlCommand<'a> {
 }
 
 #[bitfield]
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct PortStatus {
     device_connected: bool,
     port_enable: bool,
@@ -128,6 +128,44 @@ pub struct PortStatus {
     change_over_current: bool,
     change_reset: bool,
     __res2: B11,
+}
+
+impl fmt::Debug for PortStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PortStatus[")?;
+        
+        let fields = [
+            ("device_connected", self.get_device_connected()),
+            ("port_enable", self.get_port_enable()),
+            ("suspend", self.get_suspend()),
+            ("over_current", self.get_over_current()),
+            ("reset", self.get_reset()),
+            ("port_power", self.get_port_power()),
+            ("low_speed", self.get_low_speed()),
+            ("high_speed", self.get_high_speed()),
+            ("port_test", self.get_port_test()),
+            ("port_indicator", self.get_port_indicator()),
+            ("change_device_connected", self.get_change_device_connected()),
+            ("change_port_enable", self.get_change_port_enable()),
+            ("change_suspend", self.get_change_suspend()),
+            ("change_over_current", self.get_change_over_current()),
+            ("change_reset", self.get_change_reset()),
+        ];
+
+        let mut is_first = true;
+        for (name, val) in fields.iter() {
+            if *val {
+                if !is_first {
+                    write!(f, ", ")?;
+                }
+                is_first = false;
+                write!(f, "{}", name)?;
+            }
+        }
+
+        write!(f, "]")?;
+        Ok(())
+    }
 }
 
 const_assert_size!(PortStatus, 4);

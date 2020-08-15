@@ -39,6 +39,7 @@ pub mod descriptor;
 pub mod drivers;
 mod error;
 pub mod items;
+pub mod layer;
 pub mod structs;
 pub mod traits;
 
@@ -55,6 +56,19 @@ pub trait UsbHAL: Sync + Send + 'static {
     fn sleep(dur: Duration);
 
     fn current_time() -> Duration;
+
+    /// Queue a function to run at a later time, for example
+    /// queue work to be done from an interrupt context on a
+    /// worker thread
+    fn queue_task(func: Box<dyn FnOnce() + Send + 'static>) {
+        func()
+    }
+
+    // Provided functions
+
+    fn queue_task_fn<F: FnOnce() + Send + 'static>(func: F) {
+        Self::queue_task(Box::new(func));
+    }
 
     fn wait_until<E, F: FnMut() -> bool>(e: E, timeout: Duration, mut func: F) -> Result<(), E> {
         let wait_limit = Self::current_time() + timeout;

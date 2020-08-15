@@ -63,6 +63,11 @@ impl USBInterfaceDescriptorSet {
             endpoints: Default::default(),
         }
     }
+
+    pub fn find_endpoint(&self, ep_type: EndpointType, is_input: bool) -> Option<&USBEndpointDescriptor> {
+        self.endpoints.iter().find(|e| e.is_input() == is_input && e.transfer_type() == ep_type)
+    }
+
 }
 
 #[derive(Default, Debug, Clone, Copy)]

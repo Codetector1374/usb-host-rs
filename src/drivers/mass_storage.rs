@@ -453,7 +453,6 @@ impl<H: UsbHAL, C: MSDCallback> MassStorageDriver<H, C> {
 
         C::on_new_scsi(scsi);
 
-        H::sleep(Duration::from_secs(5));
         Ok(())
     }
 }

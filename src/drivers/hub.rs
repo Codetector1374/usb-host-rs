@@ -7,7 +7,7 @@ use spin::RwLock;
 use crate::{as_mut_slice, USBErrorKind, UsbHAL, USBHost, USBResult};
 use crate::consts::*;
 use crate::descriptor::{USBHubDescriptor, USBInterfaceDescriptorSet};
-use crate::items::{ControlCommand, PortStatus, RequestType, TransferBuffer};
+use crate::items::{ControlCommand, PortStatus, RequestType, TransferBuffer, EndpointType};
 use crate::structs::{DeviceState, USBDevice, USBDeviceDriver};
 
 pub struct HubDriver<H: UsbHAL> {
@@ -45,6 +45,61 @@ impl<H: UsbHAL> HubDriver<H> {
         controller.configure_hub(&device, hub_descriptor.bNbrPorts, hub_descriptor.wHubCharacteristics.get_tt_think_time()).expect("Unable to configure hub");
 
         // TODO: Potentially Configure the Interrupt EP for Hub (if there is one)
+
+        if let Some(ep_interrupt) = interface.find_endpoint(EndpointType::Interrupt, true) {
+            debug!("has an interrupt endpoint");
+
+            let pipe = controller.pipe_open(device, Some(ep_interrupt))?;
+
+            let device_cloned = device.clone();
+            crate::layer::pipe_async_listener(pipe, 5, ep_interrupt.wMaxPacketSize as usize, Arc::new(move |slice, result| {
+                info!("hub status: {:?} res:{:?}", slice, result);
+
+                for (byte_i, byte) in slice.iter().cloned().enumerate() {
+                    for i in 0..8 {
+                        // index=0 hub change, index=1-n port 1-n change
+                        let index = byte_i * 8 + i;
+                        if ((byte >> i) & 0b1) != 0 {
+                            if index == 0 {
+                                debug!("hub change");
+                            } else {
+                                match Self::fetch_port_status(&device_cloned, index as u8) {
+                                    Ok(status) => {
+                                        debug!("port status {}: {:?}", index, &status);
+
+                                        if status.get_change_device_connected() {
+                                            Self::clear_feature(&device_cloned, index as u8, FEATURE_C_PORT_CONNECTION);
+                                        }
+                                        if status.get_change_port_enable() {
+                                            Self::clear_feature(&device_cloned, index as u8, FEATURE_C_PORT_ENABLE);
+                                        }
+                                        if status.get_change_suspend() {
+                                            Self::clear_feature(&device_cloned, index as u8, FEATURE_C_PORT_SUSPEND);
+                                        }
+                                        if status.get_change_over_current() {
+                                            Self::clear_feature(&device_cloned, index as u8, FEATURE_C_PORT_OVER_CURRENT);
+                                        }
+                                        if status.get_change_reset() {
+                                            Self::clear_feature(&device_cloned, index as u8, FEATURE_C_PORT_RESET);
+                                        }
+
+                                        H::queue_task_fn(|| {
+                                            debug!("queued task");
+                                        });
+
+
+                                    },
+                                    Err(e) => warn!("port error {}: {:?}", index, e),
+                                }
+
+                            }
+                        }
+                    }
+                }
+
+            }))?;
+
+        }
 
         for num in 1..=hub_descriptor.bNbrPorts {
             if let Err(e) = HubDriver::<H>::probe_port(host, device, &hub_descriptor, num) {
