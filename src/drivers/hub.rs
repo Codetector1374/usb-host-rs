@@ -1,4 +1,5 @@
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::time::Duration;
 
@@ -7,19 +8,68 @@ use spin::RwLock;
 use crate::{as_mut_slice, USBErrorKind, UsbHAL, USBHost, USBResult};
 use crate::consts::*;
 use crate::descriptor::{USBHubDescriptor, USBInterfaceDescriptorSet};
-use crate::items::{ControlCommand, PortStatus, RequestType, TransferBuffer, EndpointType};
+use crate::items::{ControlCommand, EndpointType, PortStatus, RequestType, TransferBuffer};
+use crate::layer::PipeAsyncListener;
 use crate::structs::{DeviceState, USBDevice, USBDeviceDriver};
 
 pub struct HubDriver<H: UsbHAL> {
+    host: Arc<USBHost<H>>,
+    device: Arc<RwLock<USBDevice>>,
+    interface: USBInterfaceDescriptorSet,
+    hub_descriptor: RwLock<Option<USBHubDescriptor>>,
+    children: RwLock<Vec<Option<Arc<RwLock<USBDevice>>>>>,
     __phantom: PhantomData<H>,
 }
 
-impl<H: UsbHAL> USBDeviceDriver for HubDriver<H> {}
+impl<H: UsbHAL> USBDeviceDriver for HubDriver<H> {
+    fn on_attach(&self) -> USBResult<()> {
+        let mut hub_descriptor = USBHubDescriptor::default();
+        USBHost::<H>::fetch_descriptor(&self.device, RequestType::Class, DESCRIPTOR_TYPE_HUB, 0, 0, &mut hub_descriptor)?;
+        info!("Hub Descriptor: {:?}", hub_descriptor);
+
+        *self.hub_descriptor.write() = Some(hub_descriptor.clone());
+
+        {
+            let mut v = self.children.write();
+            // use native indexing (0th element will always be None)
+            v.resize(hub_descriptor.bNbrPorts as usize + 1, None);
+        }
+
+        // Setup EPs
+        debug!("Found {} eps on this interface", self.interface.endpoints.len());
+
+        let controller = self.device.read().bus.read().controller.clone();
+        controller.configure_hub(&self.device, hub_descriptor.bNbrPorts, hub_descriptor.wHubCharacteristics.get_tt_think_time()).expect("Unable to configure hub");
+
+        // TODO: Potentially Configure the Interrupt EP for Hub (if there is one)
+
+        if let Some(ep_interrupt) = self.interface.find_endpoint(EndpointType::Interrupt, true) {
+            debug!("has an interrupt endpoint");
+
+            let pipe = controller.pipe_open(&self.device, Some(ep_interrupt))?;
+
+            crate::layer::pipe_async_listener(pipe, 5, ep_interrupt.wMaxPacketSize as usize,
+                                              Self::create_interrupt_listener(&self.device)?)?;
+        }
+
+        for num in 1..=hub_descriptor.bNbrPorts {
+            if let Err(e) = self.probe_port(num) {
+                error!("failed to probe hub port {}: {:?}", num, e);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn on_disconnect(&self) {
+        debug!("hub disconnected");
+    }
+}
 
 impl<H: UsbHAL> HubDriver<H> {
     pub fn probe(host: &Arc<USBHost<H>>, device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptorSet) -> USBResult<()> {
         if interface.interface.bInterfaceClass != CLASS_CODE_HUB {
-            return Ok(())
+            return Ok(());
         }
 
         if interface.endpoints.len() == 0 {
@@ -29,93 +79,110 @@ impl<H: UsbHAL> HubDriver<H> {
             warn!("Hub with more than 1 endpoint!");
         }
 
-        {
-            let mut d = device.write();
-            d.device_state = DeviceState::Owned(Arc::new(HubDriver::<H> { __phantom: PhantomData::default() }))
-        }
+        USBDevice::attach_driver(device, Arc::new(HubDriver::<H> {
+            host: host.clone(),
+            device: device.clone(),
+            interface: interface.clone(),
+            hub_descriptor: RwLock::new(None),
+            children: RwLock::new(Vec::new()),
+            __phantom: PhantomData::default(),
+        }))
+    }
 
-        let mut hub_descriptor = USBHubDescriptor::default();
-        USBHost::<H>::fetch_descriptor(&device, RequestType::Class, DESCRIPTOR_TYPE_HUB, 0, 0, &mut hub_descriptor)?;
-        info!("Hub Descriptor: {:?}", hub_descriptor);
+    fn create_interrupt_listener(device: &Arc<RwLock<USBDevice>>) -> USBResult<PipeAsyncListener> {
+        let driver: Arc<HubDriver<H>> = USBDevice::get_driver(device.read())
+            .ok_or(USBErrorKind::InvalidState.msg("driver not attached???"))?
+            .downcast_arc().map_err(|_| USBErrorKind::InvalidState.msg("wrong driver???"))?;
 
-        // Setup EPs
-        debug!("Found {} eps on this interface", interface.endpoints.len());
+        Ok(Arc::new(move |slice, result| {
+            info!("hub status: {:?} res:{:?}", slice, result);
 
-        let controller = device.read().bus.read().controller.clone();
-        controller.configure_hub(&device, hub_descriptor.bNbrPorts, hub_descriptor.wHubCharacteristics.get_tt_think_time()).expect("Unable to configure hub");
-
-        // TODO: Potentially Configure the Interrupt EP for Hub (if there is one)
-
-        if let Some(ep_interrupt) = interface.find_endpoint(EndpointType::Interrupt, true) {
-            debug!("has an interrupt endpoint");
-
-            let pipe = controller.pipe_open(device, Some(ep_interrupt))?;
-
-            let device_cloned = device.clone();
-            crate::layer::pipe_async_listener(pipe, 5, ep_interrupt.wMaxPacketSize as usize, Arc::new(move |slice, result| {
-                info!("hub status: {:?} res:{:?}", slice, result);
-
-                for (byte_i, byte) in slice.iter().cloned().enumerate() {
-                    for i in 0..8 {
-                        // index=0 hub change, index=1-n port 1-n change
-                        let index = byte_i * 8 + i;
-                        if ((byte >> i) & 0b1) != 0 {
-                            if index == 0 {
-                                debug!("hub change");
-                            } else {
-                                match Self::fetch_port_status(&device_cloned, index as u8) {
-                                    Ok(status) => {
-                                        debug!("port status {}: {:?}", index, &status);
-
-                                        if status.get_change_device_connected() {
-                                            Self::clear_feature(&device_cloned, index as u8, FEATURE_C_PORT_CONNECTION);
-                                        }
-                                        if status.get_change_port_enable() {
-                                            Self::clear_feature(&device_cloned, index as u8, FEATURE_C_PORT_ENABLE);
-                                        }
-                                        if status.get_change_suspend() {
-                                            Self::clear_feature(&device_cloned, index as u8, FEATURE_C_PORT_SUSPEND);
-                                        }
-                                        if status.get_change_over_current() {
-                                            Self::clear_feature(&device_cloned, index as u8, FEATURE_C_PORT_OVER_CURRENT);
-                                        }
-                                        if status.get_change_reset() {
-                                            Self::clear_feature(&device_cloned, index as u8, FEATURE_C_PORT_RESET);
-                                        }
-
-                                        H::queue_task_fn(|| {
-                                            debug!("queued task");
-                                        });
-
-
-                                    },
-                                    Err(e) => warn!("port error {}: {:?}", index, e),
-                                }
-
-                            }
+            for (byte_i, byte) in slice.iter().cloned().enumerate() {
+                for i in 0..8 {
+                    // index=0 hub change, index=1-n port 1-n change
+                    let index = byte_i * 8 + i;
+                    if ((byte >> i) & 0b1) != 0 {
+                        if index == 0 {
+                            debug!("hub change");
+                        } else {
+                            Self::interrupt_on_port_change(driver.clone(), index as u8);
                         }
                     }
                 }
-
-            }))?;
-
-        }
-
-        for num in 1..=hub_descriptor.bNbrPorts {
-            if let Err(e) = HubDriver::<H>::probe_port(host, device, &hub_descriptor, num) {
-                error!("failed to probe hub port {}: {:?}", num, e);
             }
-        }
-
-        Ok(())
+        }))
     }
 
-    fn probe_port(host: &Arc<USBHost<H>>, device: &Arc<RwLock<USBDevice>>, hub_descriptor: &USBHubDescriptor, port: u8) -> USBResult<()> {
-        Self::set_feature(device, port, FEATURE_PORT_POWER)?;
+    fn interrupt_on_port_change(this: Arc<Self>, index: u8) {
+        H::queue_task_fn(move || {
+            match Self::fetch_port_status(&this.device, index) {
+                Ok(status) => {
+                    debug!("port status {}: {:?}", index, &status);
+
+                    if status.get_change_device_connected() {
+                        Self::clear_feature(&this.device, index, FEATURE_C_PORT_CONNECTION);
+                    }
+                    if status.get_change_port_enable() {
+                        Self::clear_feature(&this.device, index, FEATURE_C_PORT_ENABLE);
+                    }
+                    if status.get_change_suspend() {
+                        Self::clear_feature(&this.device, index, FEATURE_C_PORT_SUSPEND);
+                    }
+                    if status.get_change_over_current() {
+                        Self::clear_feature(&this.device, index, FEATURE_C_PORT_OVER_CURRENT);
+                    }
+                    if status.get_change_reset() {
+                        Self::clear_feature(&this.device, index, FEATURE_C_PORT_RESET);
+                    }
+
+                    if status.get_device_connected() && status.get_change_device_connected() {
+                        H::queue_task_fn(move || {
+                            if let Err(e) = this.probe_port(index) {
+                                warn!("probe error: {:?}", e);
+                            }
+                        });
+                    } else if !status.get_device_connected() && status.get_change_device_connected() {
+                        H::queue_task_fn(move || {
+                            let lock = this.children.upgradeable_read();
+
+                            if let Some(device) = &lock[index as usize] {
+                                let mut dev_lock = device.write();
+
+                                match core::mem::replace(&mut dev_lock.device_state, DeviceState::Disconnected) {
+                                    DeviceState::Idle => {},
+                                    DeviceState::Owned(driver) => {
+                                        driver.on_disconnect();
+                                    }
+                                    _ => {},
+                                }
+
+                                core::mem::drop(dev_lock);
+
+                                let mut lock = lock.upgrade();
+                                lock[index as usize] = None;
+                            } else {
+                                warn!("got device disconnect for a device never created: port={}", index);
+                            }
+
+
+                            ;
+                        });
+                    }
+                }
+                Err(e) => warn!("port error {}: {:?}", index, e),
+            }
+        });
+    }
+
+    fn probe_port(&self, port: u8) -> USBResult<()> {
+        let hub_desc_lock = self.hub_descriptor.read();
+        let hub_descriptor = hub_desc_lock.as_ref().unwrap();
+
+        Self::set_feature(&self.device, port, FEATURE_PORT_POWER)?;
         H::sleep(Duration::from_millis(hub_descriptor.bPwrOn2PwrGood as u64 * 2));
 
-        Self::clear_feature(device, port, FEATURE_C_PORT_CONNECTION)?;
-        let mut status = Self::fetch_port_status(device, port)?;
+        Self::clear_feature(&self.device, port, FEATURE_C_PORT_CONNECTION)?;
+        let mut status = Self::fetch_port_status(&self.device, port)?;
 
         debug!("Port {}: status={:?}", port, status);
 
@@ -125,9 +192,9 @@ impl<H: UsbHAL> HubDriver<H> {
 
         debug!("Acquiring locks");
 
-        let child_parent_device = device.clone();
+        let child_parent_device = self.device.clone();
 
-        let dev_lock = device.read();
+        let dev_lock = self.device.read();
 
         let child_bus = dev_lock.bus.clone();
         let bus_lock = dev_lock.bus.read();
@@ -136,9 +203,9 @@ impl<H: UsbHAL> HubDriver<H> {
         debug!("creating new child device");
 
         debug!("resetting device");
-        Self::reset_port(device, port)?;
+        Self::reset_port(&self.device, port)?;
 
-        let status = Self::fetch_port_status(device, port)?;
+        let status = Self::fetch_port_status(&self.device, port)?;
 
         let child_device = USBHost::<H>::new_device(Some(child_parent_device), child_bus, status.get_speed(), slot as u32, port)?;
 
@@ -165,7 +232,12 @@ impl<H: UsbHAL> HubDriver<H> {
         core::mem::drop(dev_lock);
 
         debug!("recursive setup_new_device()");
-        USBHost::<H>::setup_new_device(host, child_device.clone())?;
+        USBHost::<H>::setup_new_device(&self.host, child_device.clone())?;
+
+        {
+            let mut v = self.children.write();
+            v[port as usize] = Some(child_device);
+        }
 
         Ok(())
     }

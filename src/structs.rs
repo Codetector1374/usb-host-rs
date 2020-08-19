@@ -3,22 +3,25 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::ops::Deref;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use downcast_rs::DowncastSync;
 use hashbrown::HashMap;
 use spin::{Mutex, RwLock};
 
+use crate::{error, items, USBErrorKind, USBResult};
 use crate::consts::{DESCRIPTOR_TYPE_ENDPOINT, USBSpeed};
 use crate::descriptor::{USBConfigurationDescriptor, USBConfigurationDescriptorSet, USBDeviceDescriptor, USBEndpointDescriptor};
 use crate::items::{ControlCommand, EndpointType, TransferBuffer};
-use crate::{items, error, USBResult};
-use crate::traits::{USBHostController, USBMeta, USBAsyncReadFn};
-use downcast_rs::DowncastSync;
+use crate::traits::{USBAsyncReadFn, USBHostController, USBMeta};
 
 pub trait USBDeviceDriver: DowncastSync {
+    fn on_attach(&self) -> USBResult<()> {
+        Ok(())
+    }
 
     fn on_disconnect(&self) {}
-
 }
 
 impl_downcast!(sync USBDeviceDriver);
@@ -72,6 +75,32 @@ impl USBDevice {
             _ => panic!("oofed"),
         };
         device
+    }
+
+    pub fn attach_driver(device: &Arc<RwLock<USBDevice>>, driver: Arc<dyn USBDeviceDriver>) -> USBResult<()> {
+        {
+            let mut d = device.write();
+            if !matches!(d.device_state, DeviceState::Idle) {
+                return USBErrorKind::InvalidArgument.err("device is not idle");
+            }
+            d.device_state = DeviceState::Owned(driver.clone());
+        }
+
+        if let Err(e) = driver.on_attach() {
+            let mut d = device.write();
+            d.device_state = DeviceState::Idle;
+            return Err(e);
+        }
+
+        Ok(())
+    }
+
+    pub fn get_driver<T: Deref<Target=USBDevice>>(val: T) -> Option<Arc<dyn USBDeviceDriver>> {
+        if let DeviceState::Owned(v) = &val.device_state {
+            Some(v.clone())
+        } else {
+            None
+        }
     }
 }
 

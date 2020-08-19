@@ -197,13 +197,13 @@ impl SCSIBuilder {
         self.0.push(num);
         self
     }
-    pub fn push_u16(mut self, num: u16) -> Self {
+    pub fn push_u16(self, num: u16) -> Self {
         self.push_bytes(num.to_be_bytes().as_ref())
     }
-    pub fn push_u32(mut self, num: u32) -> Self {
+    pub fn push_u32(self, num: u32) -> Self {
         self.push_bytes(num.to_be_bytes().as_ref())
     }
-    pub fn push_u64(mut self, num: u64) -> Self {
+    pub fn push_u64(self, num: u64) -> Self {
         self.push_bytes(num.to_be_bytes().as_ref())
     }
     pub fn into_vec(self) -> Vec<u8> {

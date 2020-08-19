@@ -84,7 +84,7 @@ pub trait UsbHAL: Sync + Send + 'static {
     }
 }
 
-pub trait HostCallbacks<H: UsbHAL>: Sync {
+pub trait HostCallbacks<H: UsbHAL>: Sync + Send {
     fn new_device(&self, host: &Arc<USBHost<H>>, device: &Arc<RwLock<USBDevice>>) -> USBResult<()> {
         Ok(())
     }
