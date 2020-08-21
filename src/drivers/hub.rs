@@ -1,11 +1,14 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
+use core::sync::atomic::AtomicU8;
+use core::sync::atomic::Ordering;
 use core::time::Duration;
 
 use spin::RwLock;
 
 use crate::{as_mut_slice, USBErrorKind, UsbHAL, USBHost, USBResult};
+use crate::collection::SyncArray;
 use crate::consts::*;
 use crate::descriptor::{USBHubDescriptor, USBInterfaceDescriptorSet};
 use crate::items::{ControlCommand, EndpointType, PortStatus, RequestType, TransferBuffer};
@@ -15,9 +18,10 @@ use crate::structs::{DeviceState, USBDevice, USBDeviceDriver};
 pub struct HubDriver<H: UsbHAL> {
     host: Arc<USBHost<H>>,
     device: Arc<RwLock<USBDevice>>,
+    num_ports: AtomicU8,
     interface: USBInterfaceDescriptorSet,
     hub_descriptor: RwLock<Option<USBHubDescriptor>>,
-    children: RwLock<Vec<Option<Arc<RwLock<USBDevice>>>>>,
+    children: SyncArray<Option<Arc<RwLock<USBDevice>>>>,
     __phantom: PhantomData<H>,
 }
 
@@ -28,20 +32,13 @@ impl<H: UsbHAL> USBDeviceDriver for HubDriver<H> {
         info!("Hub Descriptor: {:?}", hub_descriptor);
 
         *self.hub_descriptor.write() = Some(hub_descriptor.clone());
-
-        {
-            let mut v = self.children.write();
-            // use native indexing (0th element will always be None)
-            v.resize(hub_descriptor.bNbrPorts as usize + 1, None);
-        }
+        self.num_ports.store(hub_descriptor.bNbrPorts, Ordering::Relaxed);
 
         // Setup EPs
         debug!("Found {} eps on this interface", self.interface.endpoints.len());
 
-        let controller = self.device.read().bus.read().controller.clone();
+        let controller = self.device.read().bus.controller.clone();
         controller.configure_hub(&self.device, hub_descriptor.bNbrPorts, hub_descriptor.wHubCharacteristics.get_tt_think_time()).expect("Unable to configure hub");
-
-        // TODO: Potentially Configure the Interrupt EP for Hub (if there is one)
 
         if let Some(ep_interrupt) = self.interface.find_endpoint(EndpointType::Interrupt, true) {
             debug!("has an interrupt endpoint");
@@ -63,6 +60,13 @@ impl<H: UsbHAL> USBDeviceDriver for HubDriver<H> {
 
     fn on_disconnect(&self) {
         debug!("hub disconnected");
+
+        for num in 1..=self.num_ports.load(Ordering::Relaxed) {
+            if let Some(child) = self.children.replace(num as usize, None) {
+                let mut lock = child.write();
+                lock.handle_disconnect();
+            }
+        }
     }
 }
 
@@ -84,7 +88,8 @@ impl<H: UsbHAL> HubDriver<H> {
             device: device.clone(),
             interface: interface.clone(),
             hub_descriptor: RwLock::new(None),
-            children: RwLock::new(Vec::new()),
+            num_ports: AtomicU8::new(0),
+            children: SyncArray::new(256),
             __phantom: PhantomData::default(),
         }))
     }
@@ -143,29 +148,12 @@ impl<H: UsbHAL> HubDriver<H> {
                         });
                     } else if !status.get_device_connected() && status.get_change_device_connected() {
                         H::queue_task_fn(move || {
-                            let lock = this.children.upgradeable_read();
-
-                            if let Some(device) = &lock[index as usize] {
+                            if let Some(device) = this.children.replace(index as usize, None) {
                                 let mut dev_lock = device.write();
-
-                                match core::mem::replace(&mut dev_lock.device_state, DeviceState::Disconnected) {
-                                    DeviceState::Idle => {},
-                                    DeviceState::Owned(driver) => {
-                                        driver.on_disconnect();
-                                    }
-                                    _ => {},
-                                }
-
-                                core::mem::drop(dev_lock);
-
-                                let mut lock = lock.upgrade();
-                                lock[index as usize] = None;
+                                dev_lock.handle_disconnect();
                             } else {
                                 warn!("got device disconnect for a device never created: port={}", index);
                             }
-
-
-                            ;
                         });
                     }
                 }
@@ -197,8 +185,8 @@ impl<H: UsbHAL> HubDriver<H> {
         let dev_lock = self.device.read();
 
         let child_bus = dev_lock.bus.clone();
-        let bus_lock = dev_lock.bus.read();
-        let slot = bus_lock.controller.allocate_slot()?;
+        let controller = dev_lock.bus.controller.clone();
+        let slot = controller.allocate_slot()?;
 
         debug!("creating new child device");
 
@@ -211,7 +199,7 @@ impl<H: UsbHAL> HubDriver<H> {
 
         debug!("opening control pipe");
         // open the control "endpoint" on the root hub.
-        bus_lock.controller.pipe_open(&child_device, None)?;
+        controller.pipe_open(&child_device, None)?;
 
         H::sleep(Duration::from_millis(10));
         debug!("Going to fetch descriptor...");
@@ -226,18 +214,14 @@ impl<H: UsbHAL> HubDriver<H> {
         }
 
         debug!("setting address");
-        bus_lock.controller.set_address(&child_device, slot as u32)?;
+        controller.set_address(&child_device, slot as u32)?;
 
-        core::mem::drop(bus_lock);
         core::mem::drop(dev_lock);
 
         debug!("recursive setup_new_device()");
         USBHost::<H>::setup_new_device(&self.host, child_device.clone())?;
 
-        {
-            let mut v = self.children.write();
-            v[port as usize] = Some(child_device);
-        }
+        self.children.set(port as usize, Some(child_device));
 
         Ok(())
     }

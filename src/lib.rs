@@ -34,6 +34,7 @@ use crate::drivers::keyboard::HIDKeyboard;
 #[macro_use]
 pub mod macros;
 
+pub mod collection;
 pub mod consts;
 pub mod descriptor;
 pub mod drivers;
@@ -94,7 +95,7 @@ pub trait HostCallbacks<H: UsbHAL>: Sync + Send {
 
 pub struct USBHost<H: UsbHAL> {
     count: u32,
-    root_hubs: RwLock<HashMap<u32, Arc<RwLock<USBBus>>>>,
+    root_hubs: RwLock<HashMap<u32, Arc<USBBus>>>,
     __phantom: PhantomData<H>,
     callbacks: Arc<dyn HostCallbacks<H>>,
 }
@@ -111,16 +112,13 @@ impl<H: UsbHAL> USBHost<H> {
     }
 
     pub fn attach_root_hub(&mut self, controller: Arc<dyn USBHostController>, speed: USBSpeed) -> Arc<RwLock<USBDevice>> {
-        let mut bus = Arc::new(RwLock::new(USBBus::new(controller.clone())));
+        let mut bus = Arc::new(USBBus::new(controller.clone()));
 
         let device = Self::new_device(None, bus.clone(), speed, 0, 1)
             .unwrap_or_else(|e| panic!("Error: {:?}", e));
         controller.register_root_hub(&device);
 
-        {
-            let mut bus_lock = bus.write();
-            bus_lock.devices[0] = Some(device.clone());
-        }
+        bus.devices.set(0, Some(device.clone()));
 
         let count = self.count;
         {
@@ -138,7 +136,7 @@ impl<H: UsbHAL> USBHost<H> {
     /// Called when a new device is put into powered state but not yet addressed.
     /// This function will get the initial descriptor, set address, get full descriptor and attach
     /// a driver (if applicable)
-    pub fn new_device(parent: Option<Arc<RwLock<USBDevice>>>, bus: Arc<RwLock<USBBus>>, speed: USBSpeed, addr: u32, port: u8) -> USBResult<Arc<RwLock<USBDevice>>> {
+    pub fn new_device(parent: Option<Arc<RwLock<USBDevice>>>, bus: Arc<USBBus>, speed: USBSpeed, addr: u32, port: u8) -> USBResult<Arc<RwLock<USBDevice>>> {
         // Calculate initial MPS
         let max_packet_size = match speed {
             USBSpeed::Low => 8u16,
@@ -170,19 +168,18 @@ impl<H: UsbHAL> USBHost<H> {
         let cloned_device = device.clone();
 
         let dev_lock = device.read();
-        let bus = dev_lock.bus.clone();
-        let mut bus_lock = bus.read();
+        let controller = dev_lock.bus.controller.clone();
 
         let control_endpoint = USBPipe {
             device: cloned_device,
-            controller: bus_lock.controller.clone(),
+            controller,
             index: 0,
             endpoint_type: EndpointType::Control,
             max_packet_size: dev_lock.ddesc.get_max_packet_size() as usize,
             is_input: true,
         };
 
-        bus_lock.controller.control_transfer(&control_endpoint, command)
+        dev_lock.bus.controller.control_transfer(&control_endpoint, command)
     }
 
     pub fn fetch_descriptor_slice(device: &Arc<RwLock<USBDevice>>, req_type: RequestType, desc_type: u8, desc_index: u8, w_index: u16, slice: &mut [u8]) -> USBResult<()> {
@@ -315,8 +312,7 @@ impl<H: UsbHAL> USBHost<H> {
             let dev_cloned = device.clone();
             let mut dev_lock = device.write();
             dev_lock.device_state = DeviceState::Idle;
-            let mut bus_lock = dev_lock.bus.write();
-            bus_lock.devices[dev_lock.addr as usize] = Some(dev_cloned);
+            dev_lock.bus.devices.set(dev_lock.addr as usize, Some(dev_cloned));
         }
 
         host.callbacks.new_device(host, &device);

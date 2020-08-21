@@ -414,7 +414,6 @@ impl<H: UsbHAL, C: MSDCallback> MassStorageDriver<H, C> {
         debug!("acquiring locks");
 
         let dev_lock = device.read();
-        let bus_lock = dev_lock.bus.read();
 
         let mut input_ep: Option<Arc<RwLock<USBPipe>>> = None;
         let mut output_ep: Option<Arc<RwLock<USBPipe>>> = None;
@@ -426,7 +425,7 @@ impl<H: UsbHAL, C: MSDCallback> MassStorageDriver<H, C> {
 
             debug!("opening pipe: {}", endpoint.bEndpointAddress);
 
-            let pipe = bus_lock.controller.pipe_open(device, Some(endpoint))?;
+            let pipe = dev_lock.bus.controller.pipe_open(device, Some(endpoint))?;
 
             if endpoint.is_input() {
                 input_ep = Some(pipe);

@@ -15,6 +15,7 @@ use crate::consts::{DESCRIPTOR_TYPE_ENDPOINT, USBSpeed};
 use crate::descriptor::{USBConfigurationDescriptor, USBConfigurationDescriptorSet, USBDeviceDescriptor, USBEndpointDescriptor};
 use crate::items::{ControlCommand, EndpointType, TransferBuffer};
 use crate::traits::{USBAsyncReadFn, USBHostController, USBMeta};
+use crate::collection::SyncArray;
 
 pub trait USBDeviceDriver: DowncastSync {
     fn on_attach(&self) -> USBResult<()> {
@@ -35,7 +36,7 @@ pub enum DeviceState {
 
 /// Describes a Generic USB Device
 pub struct USBDevice {
-    pub bus: Arc<RwLock<USBBus>>,
+    pub bus: Arc<USBBus>,
     pub addr: u32,
     pub port: u8,
     pub speed: USBSpeed,
@@ -53,7 +54,7 @@ pub struct USBDevice {
 }
 
 impl USBDevice {
-    pub fn new(parent: Option<Arc<RwLock<USBDevice>>>, bus: Arc<RwLock<USBBus>>, max_packet_size: u16, addr: u32, port: u8, speed: USBSpeed, depth: u8) -> Self {
+    pub fn new(parent: Option<Arc<RwLock<USBDevice>>>, bus: Arc<USBBus>, max_packet_size: u16, addr: u32, port: u8, speed: USBSpeed, depth: u8) -> Self {
         let mut device = Self {
             bus,
             addr,
@@ -102,21 +103,40 @@ impl USBDevice {
             None
         }
     }
+
+    pub fn handle_disconnect(&mut self) {
+        match core::mem::replace(&mut self.device_state, DeviceState::Disconnected) {
+            DeviceState::Idle => {},
+            DeviceState::Owned(driver) => {
+                driver.on_disconnect();
+            }
+            DeviceState::Disconnected => {
+                error!("Disconnecting a device multiple times!");
+                return;
+            }
+            _ => {},
+        }
+
+        self.bus.devices.replace(self.addr as usize, None);
+    }
+}
+
+impl Drop for USBDevice {
+    fn drop(&mut self) {
+        self.bus.controller.free_slot(self.addr as u8);
+    }
 }
 
 pub struct USBBus {
     pub controller: Arc<dyn USBHostController>,
-    pub devices: Vec<Option<Arc<RwLock<USBDevice>>>>,
+    pub devices: SyncArray<Option<Arc<RwLock<USBDevice>>>>,
 }
 
 impl USBBus {
     pub fn new(controller: Arc<dyn USBHostController>) -> Self {
-        let mut devices = Vec::new();
-        devices.resize(256, None);
-
         Self {
             controller,
-            devices,
+            devices: SyncArray::new(256),
         }
     }
 }
@@ -153,9 +173,9 @@ pub struct USBPipe {
 }
 
 impl USBPipe {
-    pub fn control_transfer(&self, command: ControlCommand) {
+    pub fn control_transfer(&self, command: ControlCommand) -> USBResult<()> {
         assert!(matches!(self.endpoint_type, EndpointType::Control));
-        self.controller.control_transfer(&self, command);
+        self.controller.control_transfer(&self, command)
     }
 
     pub fn bulk_write(&self, buf: &[u8]) -> USBResult<usize> {

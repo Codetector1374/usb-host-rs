@@ -57,9 +57,8 @@ impl<H: UsbHAL> HIDKeyboard<H> {
         // Enable keyboard
 
         let dev_lock = device.read();
-        let bus_lock = dev_lock.bus.read();
 
-        let pipe = bus_lock.controller.pipe_open(device, Some(ep_interrupt)).unwrap_or_else(|e| panic!("{:?}", e));
+        let pipe = dev_lock.bus.controller.pipe_open(device, Some(ep_interrupt)).unwrap_or_else(|e| panic!("{:?}", e));
 
         debug!("done keyboard configure endpoint");
 
