@@ -7,7 +7,8 @@ pub enum USBErrorKind {
     InvalidState,
     InvalidDescriptor,
     NoDriver,
-    Timeout
+    Disconnected,
+    Timeout,
 }
 
 impl USBErrorKind {

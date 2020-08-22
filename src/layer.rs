@@ -12,6 +12,11 @@ pub type PipeAsyncListener = Arc<dyn Fn(&[u8], USBResult<usize>) + Send + Sync>;
 fn do_pipe_async(pipe: Arc<RwLock<USBPipe>>, buf: Vec<u8>, func: PipeAsyncListener) -> USBResult<()> {
     let pipe_cloned = pipe.clone();
     let pipe_lock = pipe.read();
+
+    if pipe_lock.get_device().is_err() {
+       return Ok(())
+    }
+
     pipe_lock.async_read(buf, Box::new(move |buf, result| {
         func(buf.as_slice(), result);
         if let Err(e) = do_pipe_async(pipe_cloned, buf, func) {

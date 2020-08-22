@@ -118,7 +118,7 @@ impl<H: UsbHAL> USBHost<H> {
             .unwrap_or_else(|e| panic!("Error: {:?}", e));
         controller.register_root_hub(&device);
 
-        bus.devices.set(0, Some(device.clone()));
+        bus.devices.set(0, Some(Arc::downgrade(&device)));
 
         let count = self.count;
         {
@@ -165,10 +165,10 @@ impl<H: UsbHAL> USBHost<H> {
 
     pub fn device_control_transfer(device: &Arc<RwLock<USBDevice>>, command: ControlCommand) -> USBResult<()> {
         // TODO refactor to store endpoint in the USBDevice then use the existing Control endpoint instead of making a fake one here.
-        let cloned_device = device.clone();
+        let cloned_device = Arc::downgrade(&device);
 
         let dev_lock = device.read();
-        let controller = dev_lock.bus.controller.clone();
+        let controller = Arc::downgrade(&dev_lock.bus.controller);
 
         let control_endpoint = USBPipe {
             device: cloned_device,
@@ -309,77 +309,17 @@ impl<H: UsbHAL> USBHost<H> {
         H::sleep(Duration::from_millis(10));
 
         {
-            let dev_cloned = device.clone();
+            let dev_cloned_weak = Arc::downgrade(&device);
             let mut dev_lock = device.write();
             dev_lock.device_state = DeviceState::Idle;
-            dev_lock.bus.devices.set(dev_lock.addr as usize, Some(dev_cloned));
+            dev_lock.bus.devices.set(dev_lock.addr as usize, Some(dev_cloned_weak));
         }
 
         host.callbacks.new_device(host, &device);
 
-        // Fetching language is removed due to various issues and most OS doesn't do it.
-        // let mut buf = [0u8; 2];
-        // self.fetch_descriptor(port.slot_id, DESCRIPTOR_TYPE_STRING,
-        //                       0, 0, &mut buf)?;
-        // assert_eq!(buf[1], DESCRIPTOR_TYPE_STRING, "Descriptor is not STRING");
-        // assert!(buf[0] >= 4, "has language");
-        // let mut buf2: Vec<u8> = Vec::new();
-        // buf2.resize(buf[0] as usize, 0);
-        // self.fetch_descriptor(port.slot_id, DESCRIPTOR_TYPE_STRING,
-        //                       0, 0, &mut buf2)?;
-        // let lang = buf2[2] as u16 | ((buf2[3] as u16) << 8);
-        //
-        // debug!("Language code: {:#x}", lang);
-
-        // Display things
-        // let mfg = Self::fetch_string_descriptor(&device, device_desc.iManufacturer, 0x409).unwrap_or(String::from("(no manufacturer name)"));
-        // let prd = Self::fetch_string_descriptor(&device, device_desc.iProduct, 0x409).unwrap_or(String::from("(no product name)"));
-        // let serial = Self::fetch_string_descriptor(&device, device_desc.iSerialNumber, 0x409).unwrap_or(String::from("(no serial number)"));
-        // debug!("[XHCI] New device:\n  MFG: {}\n  Prd:{}\n  Serial:{}", mfg, prd, serial);
-        //
-        // for interface in &configuration.ifsets {
-        //     if interface.interface.bAlternateSetting != 0 {
-        //         debug!("Skipping non-default altSetting Interface");
-        //         continue;
-        //     }
-        //     match interface.interface.bInterfaceClass {
-        //         CLASS_CODE_MASS => {
-        //             if let Err(e) = MassStorageDriver::<H>::probe(&device, interface) {
-        //                 error!("failed to probe msd: {:?}", e);
-        //             }
-        //         }
-        //         CLASS_CODE_HID => {
-        //             if let Err(e) = HIDKeyboard::<H>::probe(&device, interface) {
-        //                 error!("failed to probe hid: {:?}", e);
-        //             }
-        //         }
-        //         CLASS_CODE_HUB => {
-        //             if let Err(e) = HubDriver::<H>::probe(&device, interface) {
-        //                 error!("failed to probe hub: {:?}", e);
-        //             }
-        //         }
-        //         _ => {}
-        //     }
-        // }
-
         Ok(())
     }
 
-    fn reset_port(&mut self, device: &Arc<RwLock<USBDevice>>) -> Result<(), USBError> {
-
-        // self.set_feature(parent.slot_id, port.port_id, FEATURE_PORT_RESET)?;
-        //
-        // self.wait_until("failed to reset port", PORT_RESET_TIMEOUT, |this| {
-        //     if let Ok(status) = this.fetch_port_status(parent.slot_id, port.port_id) {
-        //         status.get_change_reset()
-        //     } else {
-        //         false
-        //     }
-        // })?;
-        //
-        // self.clear_feature(parent.slot_id, port.port_id, FEATURE_C_PORT_RESET)?;
-        Ok(())
-    }
 }
 
 

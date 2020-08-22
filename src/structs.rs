@@ -1,21 +1,22 @@
 //! USB Host Device Structures
 
 use alloc::boxed::Box;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::ops::Deref;
 use core::sync::atomic::{AtomicU32, Ordering};
+use core::time::Duration;
 
 use downcast_rs::DowncastSync;
 use hashbrown::HashMap;
 use spin::{Mutex, RwLock};
 
 use crate::{error, items, USBErrorKind, USBResult};
+use crate::collection::SyncArray;
 use crate::consts::{DESCRIPTOR_TYPE_ENDPOINT, USBSpeed};
 use crate::descriptor::{USBConfigurationDescriptor, USBConfigurationDescriptorSet, USBDeviceDescriptor, USBEndpointDescriptor};
 use crate::items::{ControlCommand, EndpointType, TransferBuffer};
 use crate::traits::{USBAsyncReadFn, USBHostController, USBMeta};
-use crate::collection::SyncArray;
 
 pub trait USBDeviceDriver: DowncastSync {
     fn on_attach(&self) -> USBResult<()> {
@@ -31,7 +32,7 @@ pub enum DeviceState {
     Unconfigured,
     Idle,
     Owned(Arc<dyn USBDeviceDriver>),
-    Disconnected,
+    Disconnected(Duration),
 }
 
 /// Describes a Generic USB Device
@@ -104,17 +105,18 @@ impl USBDevice {
         }
     }
 
-    pub fn handle_disconnect(&mut self) {
-        match core::mem::replace(&mut self.device_state, DeviceState::Disconnected) {
-            DeviceState::Idle => {},
+    pub fn handle_disconnect(&mut self, time: Duration) {
+        if matches!(self.device_state, DeviceState::Disconnected(_)) {
+            error!("Disconnecting a device multiple times!");
+            return;
+        }
+
+        match core::mem::replace(&mut self.device_state, DeviceState::Disconnected(time)) {
+            DeviceState::Idle => {}
             DeviceState::Owned(driver) => {
                 driver.on_disconnect();
             }
-            DeviceState::Disconnected => {
-                error!("Disconnecting a device multiple times!");
-                return;
-            }
-            _ => {},
+            _ => {}
         }
 
         self.bus.devices.replace(self.addr as usize, None);
@@ -123,13 +125,14 @@ impl USBDevice {
 
 impl Drop for USBDevice {
     fn drop(&mut self) {
+        info!("USBDevice::drop(addr: {})", self.addr);
         self.bus.controller.free_slot(self.addr as u8);
     }
 }
 
 pub struct USBBus {
     pub controller: Arc<dyn USBHostController>,
-    pub devices: SyncArray<Option<Arc<RwLock<USBDevice>>>>,
+    pub devices: SyncArray<Option<Weak<RwLock<USBDevice>>>>,
 }
 
 impl USBBus {
@@ -162,8 +165,8 @@ impl USBEndpoint {
 
 
 pub struct USBPipe {
-    pub device: Arc<RwLock<USBDevice>>,
-    pub controller: Arc<dyn USBHostController>,
+    pub device: Weak<RwLock<USBDevice>>,
+    pub controller: Weak<dyn USBHostController>,
     pub index: u8,
     pub endpoint_type: EndpointType,
     pub max_packet_size: usize,
@@ -173,25 +176,33 @@ pub struct USBPipe {
 }
 
 impl USBPipe {
+    pub fn get_controller(&self) -> USBResult<Arc<dyn USBHostController>> {
+        self.controller.upgrade().ok_or(USBErrorKind::Disconnected.msg("usb host controller disconnected"))
+    }
+
+    pub fn get_device(&self) -> USBResult<Arc<RwLock<USBDevice>>> {
+        self.device.upgrade().ok_or(USBErrorKind::Disconnected.msg("usb device disconnected"))
+    }
+
     pub fn control_transfer(&self, command: ControlCommand) -> USBResult<()> {
         assert!(matches!(self.endpoint_type, EndpointType::Control));
-        self.controller.control_transfer(&self, command)
+        self.get_controller()?.control_transfer(&self, command)
     }
 
     pub fn bulk_write(&self, buf: &[u8]) -> USBResult<usize> {
         assert!(matches!(self.endpoint_type, EndpointType::Bulk));
         assert!(!self.is_input);
-        self.controller.bulk_transfer(&self, TransferBuffer::Write(buf))
+        self.get_controller()?.bulk_transfer(&self, TransferBuffer::Write(buf))
     }
 
     pub fn bulk_read(&self, buf: &mut [u8]) -> USBResult<usize> {
         assert!(matches!(self.endpoint_type, EndpointType::Bulk));
         assert!(self.is_input);
-        self.controller.bulk_transfer(&self, TransferBuffer::Read(buf))
+        self.get_controller()?.bulk_transfer(&self, TransferBuffer::Read(buf))
     }
 
     pub fn async_read(&self, buf: Vec<u8>, int_callback: USBAsyncReadFn) -> USBResult<()> {
-        self.controller.async_read(&self, buf, int_callback)
+        self.get_controller()?.async_read(&self, buf, int_callback)
     }
 }
 

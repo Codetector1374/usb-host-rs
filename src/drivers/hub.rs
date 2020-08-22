@@ -1,4 +1,4 @@
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::sync::atomic::AtomicU8;
@@ -64,7 +64,7 @@ impl<H: UsbHAL> USBDeviceDriver for HubDriver<H> {
         for num in 1..=self.num_ports.load(Ordering::Relaxed) {
             if let Some(child) = self.children.replace(num as usize, None) {
                 let mut lock = child.write();
-                lock.handle_disconnect();
+                lock.handle_disconnect(H::current_time());
             }
         }
     }
@@ -94,13 +94,20 @@ impl<H: UsbHAL> HubDriver<H> {
         }))
     }
 
-    fn create_interrupt_listener(device: &Arc<RwLock<USBDevice>>) -> USBResult<PipeAsyncListener> {
+    fn create_interrupt_listener(device: &Arc<RwLock<USBDevice>>) -> USBResult<PipeAsynrecListener> {
         let driver: Arc<HubDriver<H>> = USBDevice::get_driver(device.read())
             .ok_or(USBErrorKind::InvalidState.msg("driver not attached???"))?
             .downcast_arc().map_err(|_| USBErrorKind::InvalidState.msg("wrong driver???"))?;
 
+        let driver = Arc::downgrade(&driver);
+
         Ok(Arc::new(move |slice, result| {
             info!("hub status: {:?} res:{:?}", slice, result);
+
+            let arc_driver = match driver.upgrade() {
+                Some(a) => a,
+                None => return,
+            };
 
             for (byte_i, byte) in slice.iter().cloned().enumerate() {
                 for i in 0..8 {
@@ -110,7 +117,7 @@ impl<H: UsbHAL> HubDriver<H> {
                         if index == 0 {
                             debug!("hub change");
                         } else {
-                            Self::interrupt_on_port_change(driver.clone(), index as u8);
+                            Self::interrupt_on_port_change(arc_driver.clone(), index as u8);
                         }
                     }
                 }
@@ -150,7 +157,11 @@ impl<H: UsbHAL> HubDriver<H> {
                         H::queue_task_fn(move || {
                             if let Some(device) = this.children.replace(index as usize, None) {
                                 let mut dev_lock = device.write();
-                                dev_lock.handle_disconnect();
+                                dev_lock.handle_disconnect(H::current_time());
+                                core::mem::drop(dev_lock);
+                                info!("device disconnected. Arc {{ strong: {}, weak: {} }}", Arc::strong_count(&device), Arc::weak_count(&device));
+
+                                ;
                             } else {
                                 warn!("got device disconnect for a device never created: port={}", index);
                             }
