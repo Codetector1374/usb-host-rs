@@ -94,7 +94,7 @@ impl<H: UsbHAL> HubDriver<H> {
         }))
     }
 
-    fn create_interrupt_listener(device: &Arc<RwLock<USBDevice>>) -> USBResult<PipeAsynrecListener> {
+    fn create_interrupt_listener(device: &Arc<RwLock<USBDevice>>) -> USBResult<PipeAsyncListener> {
         let driver: Arc<HubDriver<H>> = USBDevice::get_driver(device.read())
             .ok_or(USBErrorKind::InvalidState.msg("driver not attached???"))?
             .downcast_arc().map_err(|_| USBErrorKind::InvalidState.msg("wrong driver???"))?;
