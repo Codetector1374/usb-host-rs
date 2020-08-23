@@ -30,6 +30,7 @@ use crate::structs::{USBBus, USBDevice, USBPipe, DeviceState};
 use crate::traits::USBHostController;
 use crate::drivers::mass_storage::MassStorageDriver;
 use crate::drivers::keyboard::HIDKeyboard;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 #[macro_use]
 pub mod macros;
@@ -94,8 +95,8 @@ pub trait HostCallbacks<H: UsbHAL>: Sync + Send {
 
 
 pub struct USBHost<H: UsbHAL> {
-    count: u32,
     root_hubs: RwLock<HashMap<u32, Arc<USBBus>>>,
+    count: AtomicU32,
     __phantom: PhantomData<H>,
     callbacks: Arc<dyn HostCallbacks<H>>,
 }
@@ -104,28 +105,26 @@ pub struct USBHost<H: UsbHAL> {
 impl<H: UsbHAL> USBHost<H> {
     pub fn new(callbacks: Arc<dyn HostCallbacks<H>>) -> Self {
         Self {
-            count: 0,
+            count: AtomicU32::new(0),
             root_hubs: RwLock::new(HashMap::new()),
             __phantom: PhantomData::default(),
             callbacks,
         }
     }
 
-    pub fn attach_root_hub(&mut self, controller: Arc<dyn USBHostController>, speed: USBSpeed) -> Arc<RwLock<USBDevice>> {
+    pub fn attach_root_hub(&self, controller: Arc<dyn USBHostController>, speed: USBSpeed) -> Arc<RwLock<USBDevice>> {
         let mut bus = Arc::new(USBBus::new(controller.clone()));
-
         let device = Self::new_device(None, bus.clone(), speed, 0, 1)
             .unwrap_or_else(|e| panic!("Error: {:?}", e));
         controller.register_root_hub(&device);
 
         bus.devices.set(0, Some(Arc::downgrade(&device)));
 
-        let count = self.count;
+        let count = self.count.fetch_add(1, Ordering::AcqRel);
         {
             let mut r = self.root_hubs.write();
             r.insert(count, bus.clone());
         }
-        self.count = count + 1;
 
         // open the control "endpoint" on the root hub.
         controller.pipe_open(&device, None);
