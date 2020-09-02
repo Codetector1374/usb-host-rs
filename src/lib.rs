@@ -90,7 +90,6 @@ pub trait HostCallbacks<H: UsbHAL>: Sync + Send {
     fn new_device(&self, host: &Arc<USBHost<H>>, device: &Arc<RwLock<USBDevice>>) -> USBResult<()> {
         Ok(())
     }
-
 }
 
 
@@ -206,9 +205,6 @@ impl<H: UsbHAL> USBHost<H> {
 
         as_mut_slice(&mut config_descriptor).copy_from_slice(&descriptor_buf[..core::mem::size_of::<USBConfigurationDescriptor>()]);
 
-        debug!("Parsing configuration: {:?}", config_descriptor);
-        debug!("raw: {:x?}", descriptor_buf.as_slice());
-
         let mut current_index = core::mem::size_of::<USBConfigurationDescriptor>();
         let mut interfaces: Vec<USBInterfaceDescriptorSet> = Default::default();
         let mut interface_set: Option<USBInterfaceDescriptorSet> = None;
@@ -284,10 +280,10 @@ impl<H: UsbHAL> USBHost<H> {
         let mut device_desc = USBDeviceDescriptor::default();
         Self::fetch_descriptor(&device, RequestType::Standard, DESCRIPTOR_TYPE_DEVICE, 0, 0, &mut device_desc);
 
-        info!("got device descriptor: {:?}", device_desc);
+        trace!("got device descriptor: {:?}", device_desc);
 
         let configuration = Self::fetch_configuration_descriptor(&device).unwrap_or_else(|e| panic!("bad: {:?}", e));
-        debug!("configuration: {:#?}", configuration);
+        trace!("configuration: {:#?}", configuration);
 
         {
             let mut dev_lock = device.write();
@@ -304,8 +300,7 @@ impl<H: UsbHAL> USBHost<H> {
             buffer: TransferBuffer::None,
         });
 
-        debug!("Applied Config {}", configuration.config.bConfigurationValue);
-        H::sleep(Duration::from_millis(10));
+        trace!("Applied Config {}", configuration.config.bConfigurationValue);
 
         {
             let dev_cloned_weak = Arc::downgrade(&device);

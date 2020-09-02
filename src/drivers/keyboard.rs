@@ -4,23 +4,77 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::time::Duration;
 
-use spin::RwLock;
+use spin::{RwLock, Mutex};
 
 use crate::{USBErrorKind, UsbHAL, USBHost, USBResult};
 use crate::consts::*;
 use crate::descriptor::{USBInterfaceDescriptor, USBInterfaceDescriptorSet};
 use crate::items::{ControlCommand, EndpointType, TransferBuffer};
 use crate::structs::{USBDevice, USBDeviceDriver, USBPipe, DeviceState};
+use core::ops::Index;
+use downcast_rs::__std::ops::IndexMut;
 
-pub struct HIDKeyboard<H: UsbHAL> {
+struct KeyState {
+    data: [u8; 32],
+}
+
+impl KeyState {
+    pub fn new() -> Self {
+        Self {
+            data: [0u8; 32]
+        }
+    }
+
+    /// This sets a key to true
+    pub fn set(&mut self, index: u8) {
+        let arr_idx = (index / 8) as usize;
+        let offset = index % 8;
+        self.data[arr_idx] |= (1u8 << offset);
+    }
+
+    pub fn get(&self, index: u8) -> bool {
+        let arr_idx = (index / 8) as usize;
+        let offset = index % 8;
+        (self.data[arr_idx] >> offset) & 0x1 != 0
+    }
+
+    pub fn clear(&mut self) {
+        self.data = [0u8; 32];
+    }
+}
+
+pub struct HIDKeyboard<H: UsbHAL, C: HIDKeyboardCallback> {
     __phantom: PhantomData<H>,
+    __phantom_cb: PhantomData<C>,
+    key_state: Mutex<KeyState>,
     // device: Arc<RwLock<USBDevice>>,
     // pipe: Arc<RwLock<USBPipe>>,
 }
 
-impl<H: UsbHAL> USBDeviceDriver for HIDKeyboard<H> {}
+pub trait HIDKeyboardCallback: Sync + Send + 'static {
+    fn key_down(ascii: u8);
+}
 
-impl<H: UsbHAL> HIDKeyboard<H> {
+impl<H: UsbHAL, C: HIDKeyboardCallback> USBDeviceDriver for HIDKeyboard<H, C> {}
+
+impl<H: UsbHAL, C: HIDKeyboardCallback> HIDKeyboard<H, C> {
+
+    fn translate_keycode(code: u8) -> Option<u8> {
+        match code {
+            // a-z
+            0x4..=0x1d => Some('a' as u8 + (code - 0x4)),
+            0x1e..=0x27 => Some('1' as u8 + (code - 0x1e)),
+            0x28 => Some(0x0A), // Enter -> LF
+            0x2a => Some(0x08), // BKSP
+            0x2c => Some(0x20), // Space
+            0x4c => Some(0x7F), // DEL
+            _ => {
+                debug!("Unknown HID Code: {:#x}", code);
+                None
+            }
+        }
+    }
+
     pub fn probe(device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptorSet) -> USBResult<()> {
         if interface.interface.bInterfaceClass != CLASS_CODE_HID {
             return Ok(());
@@ -51,7 +105,13 @@ impl<H: UsbHAL> HIDKeyboard<H> {
 
         {
             let mut d = device.write();
-            d.device_state = DeviceState::Owned(Arc::new(HIDKeyboard::<H> { __phantom: PhantomData::default() }))
+            d.device_state = DeviceState::Owned(Arc::new(
+                HIDKeyboard::<H, C> {
+                    __phantom: PhantomData::default(),
+                    __phantom_cb: PhantomData::default(),
+                    key_state: Mutex::new(KeyState::new()),
+                }
+            ))
         }
 
         // Enable keyboard
@@ -62,7 +122,7 @@ impl<H: UsbHAL> HIDKeyboard<H> {
 
         debug!("done keyboard configure endpoint");
 
-        H::sleep(Duration::from_millis(100));
+        H::sleep(Duration::from_millis(1));
 
         debug!("set hid idle");
         Self::set_hid_idle(device)?;
@@ -71,14 +131,45 @@ impl<H: UsbHAL> HIDKeyboard<H> {
         debug!("set hid protocol");
         Self::set_hid_protocol(device, 0)?;
 
+        let driver: Arc<HIDKeyboard<H, C>> = USBDevice::get_driver(device.read())
+            .ok_or(USBErrorKind::InvalidState.msg("driver not attached???"))?
+            .downcast_arc().map_err(|_| USBErrorKind::InvalidState.msg("wrong driver???"))?;
 
-        for _ in 0..20 {
-            let cloned = pipe.clone();
-            let mut buf = Vec::new();
-            buf.reserve_exact(512);
-            buf.resize(8, 0);
-            Self::register_callback(cloned, buf);
-        }
+        let driver = Arc::downgrade(&driver);
+
+        crate::layer::pipe_async_listener(pipe.clone(), 20, 8, Arc::new(move |buf, res| {
+            if let Some(arc_driver) = driver.upgrade() {
+                let mut state = arc_driver.key_state.lock();
+                let mut new_keys = [0u8; 8];
+                for (idx, key) in buf.iter().enumerate() {
+                    if !state.get(*key) {
+                        new_keys[idx] = *key;
+                    }
+                }
+
+                state.clear();
+
+                for x in buf {
+                    state.set(*x);
+                }
+
+                for x in new_keys.iter() {
+                    if *x != 0 {
+                        if let Some(x) = HIDKeyboard::<H, C>::translate_keycode(*x) {
+                            C::key_down(x)
+                        }
+                    }
+                }
+            }
+        }));
+
+        // for _ in 0..20 {
+        //     let cloned = pipe.clone();
+        //     let mut buf = Vec::new();
+        //     buf.reserve_exact(512);
+        //     buf.resize(8, 0);
+        //     Self::register_callback(cloned, buf);
+        // }
 
         // let pipe = pipe.read();
         //
@@ -108,7 +199,7 @@ impl<H: UsbHAL> HIDKeyboard<H> {
         let pip = pipe.read();
         let res = pip.async_read(buf, Box::new(move |res_buf, result| {
             match result {
-                Ok(_) => info!("got interrupt: {:?}", res_buf.as_slice()),
+                Ok(_) => trace!("got interrupt: {:?}", res_buf.as_slice()),
                 Err(e) => warn!("failed async read: {:?}", e),
             }
 

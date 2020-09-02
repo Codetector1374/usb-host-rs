@@ -160,8 +160,6 @@ impl<H: UsbHAL> HubDriver<H> {
                                 dev_lock.handle_disconnect(H::current_time());
                                 core::mem::drop(dev_lock);
                                 info!("device disconnected. Arc {{ strong: {}, weak: {} }}", Arc::strong_count(&device), Arc::weak_count(&device));
-
-                                ;
                             } else {
                                 warn!("got device disconnect for a device never created: port={}", index);
                             }
@@ -212,7 +210,6 @@ impl<H: UsbHAL> HubDriver<H> {
         // open the control "endpoint" on the root hub.
         controller.pipe_open(&child_device, None)?;
 
-        H::sleep(Duration::from_millis(10));
         debug!("Going to fetch descriptor...");
 
         let mut buf = [0u8; 8];
