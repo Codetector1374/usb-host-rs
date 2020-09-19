@@ -271,7 +271,10 @@ impl<H: UsbHAL> USBHost<H> {
         let mut buf2: Vec<u8> = Vec::new();
         buf2.resize(buf[0] as usize, 0);
         Self::fetch_descriptor_slice(device, RequestType::Standard, DESCRIPTOR_TYPE_STRING, index, lang, &mut buf2);
-        assert_eq!(buf2[1], DESCRIPTOR_TYPE_STRING);
+        if buf2[1] != DESCRIPTOR_TYPE_STRING {
+            return Err(USBErrorKind::InvalidDescriptor.msg("got wrong descriptor type value"))
+        }
+
         let buf2: Vec<u16> = buf2.chunks_exact(2).map(|l| { u16::from_ne_bytes([l[0], l[1]]) }).collect();
         Ok(String::from_utf16_lossy(&buf2[1..]))
     }
