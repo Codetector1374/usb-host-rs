@@ -1,24 +1,23 @@
-use alloc::sync::Arc;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::time::Duration;
 
 use spin::RwLock;
 
-use crate::{UsbHAL, USBErrorKind, USBResult, as_slice, as_mut_slice};
-use crate::descriptor::USBInterfaceDescriptorSet;
-use crate::structs::{USBDevice, USBPipe, DeviceState, USBDeviceDriver};
-use crate::items::{EndpointType, TransferBuffer};
+use crate::{as_mut_slice, as_slice, USBErrorKind, UsbHAL, USBResult};
 use crate::consts::CLASS_CODE_MASS;
+use crate::descriptor::USBInterfaceDescriptorSet;
+use crate::items::{EndpointType, TransferBuffer};
+use crate::structs::{DeviceState, USBDevice, USBDeviceDriver, USBPipe};
 
 pub struct MassStorageDriver<H: UsbHAL, C: MSDCallback> {
-    __phantom: PhantomData<H>,
-    __phantomC: PhantomData<C>,
+    __phantom: PhantomData<(H, C)>,
 }
 
 #[repr(C, packed)]
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 struct CommandBlockWrapper {
     signature: u32,
     tag: u32,
@@ -55,7 +54,7 @@ impl CommandBlockWrapper {
 const_assert_size!(CommandBlockWrapper, 31);
 
 #[repr(C, packed)]
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Copy, Clone)]
 struct CommandStatusWrapper {
     signature: u32,
     tag: u32,
@@ -100,7 +99,7 @@ impl BulkOnlyProtocol {
         let mut csw = CommandStatusWrapper::default();
         input_lock.bulk_read(as_mut_slice(&mut csw))?;
 
-        assert_eq!(csw.signature, CommandStatusWrapper::SIGNATURE);
+        assert_eq!({ csw.signature }, CommandStatusWrapper::SIGNATURE);
         if csw.data_residue != 0 || csw.status != 0 {
             warn!("got a bad CSW: {:?}", csw);
         }
@@ -222,19 +221,18 @@ pub struct TransparentSCSI {
 }
 
 fn read_u32(buf: &[u8], start: usize) -> u32 {
-    u32::from_be_bytes([buf[start], buf[start+1], buf[start+2], buf[start+3]])
+    u32::from_be_bytes([buf[start], buf[start + 1], buf[start + 2], buf[start + 3]])
 }
 
 fn read_u64(buf: &[u8], start: usize) -> u64 {
     u64::from_be_bytes([
-        buf[start], buf[start+1], buf[start+2], buf[start+3],
-        buf[start+4], buf[start+5], buf[start+6], buf[start+7],
+        buf[start], buf[start + 1], buf[start + 2], buf[start + 3],
+        buf[start + 4], buf[start + 5], buf[start + 6], buf[start + 7],
     ])
 }
 
 impl TransparentSCSI {
     fn new(bulk: BulkOnlyProtocol) -> USBResult<Self> {
-
         let mut inquiry = InquiryResponse::default();
         bulk.transfer(0, &[0x12, 0x00, 0x00, 0x00, 0x24, 0x00], TransferBuffer::Read(as_mut_slice(&mut inquiry)))?;
 
@@ -276,7 +274,7 @@ impl TransparentSCSI {
 
             let block_count = read_u32(slice, rec_start);
             let block_length = read_u32(slice, rec_start + 5);
-            let format = match slice[rec_start+4] & 0b11 {
+            let format = match slice[rec_start + 4] & 0b11 {
                 0b01 => FormatType::UnformattedDisk,
                 0b10 => FormatType::FormattedDisk,
                 0b11 => FormatType::NoDisk,
@@ -366,19 +364,18 @@ impl SimpleBlockDevice for TransparentSCSI {
         }
     }
 
-    fn write_sector(&mut self, n: u64, buf: &[u8]) -> USBResult<usize> {
+    fn write_sector(&mut self, _n: u64, buf: &[u8]) -> USBResult<usize> {
         if buf.len() % self.sector_size() as usize != 0 {
             return USBErrorKind::InvalidArgument.err("buffer len must be divisible by sector size");
         }
-        let block_count = buf.len() / self.sector_size() as usize;
-
+        let _block_count = buf.len() / self.sector_size() as usize;
 
         unimplemented!()
     }
 }
 
 pub trait MSDCallback: Sync + Send + 'static {
-    fn on_new_scsi(scsi: TransparentSCSI) -> USBResult<()> { Ok(()) }
+    fn on_new_scsi(_scsi: TransparentSCSI) -> USBResult<()> { Ok(()) }
 }
 
 impl<H: UsbHAL, C: MSDCallback> USBDeviceDriver for MassStorageDriver<H, C> {}
@@ -386,7 +383,7 @@ impl<H: UsbHAL, C: MSDCallback> USBDeviceDriver for MassStorageDriver<H, C> {}
 impl<H: UsbHAL, C: MSDCallback> MassStorageDriver<H, C> {
     pub fn probe(device: &Arc<RwLock<USBDevice>>, interface: &USBInterfaceDescriptorSet) -> USBResult<()> {
         if interface.interface.bInterfaceClass != CLASS_CODE_MASS {
-            return Ok(())
+            return Ok(());
         }
 
         if interface.interface.bInterfaceSubClass != 0x6 {
@@ -406,8 +403,7 @@ impl<H: UsbHAL, C: MSDCallback> MassStorageDriver<H, C> {
         {
             let mut d = device.write();
             d.device_state = DeviceState::Owned(Arc::new(MassStorageDriver::<H, C> {
-                __phantom: PhantomData::default(),
-                __phantomC: PhantomData::default(),
+                __phantom: PhantomData,
             }))
         }
 
@@ -439,7 +435,7 @@ impl<H: UsbHAL, C: MSDCallback> MassStorageDriver<H, C> {
 
         debug!("locking endpoints");
 
-        let bulk = BulkOnlyProtocol {  input_pipe: input_ep, output_pipe: output_ep };
+        let bulk = BulkOnlyProtocol { input_pipe: input_ep, output_pipe: output_ep };
 
         let mut scsi = TransparentSCSI::new(bulk)?;
 
@@ -450,7 +446,7 @@ impl<H: UsbHAL, C: MSDCallback> MassStorageDriver<H, C> {
 
         info!("Fist 16 sectors:\n{}", pretty_hex::pretty_hex(&buf.as_slice()));
 
-        C::on_new_scsi(scsi);
+        C::on_new_scsi(scsi)?;
 
         Ok(())
     }

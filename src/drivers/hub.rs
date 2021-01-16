@@ -124,7 +124,7 @@ impl<H: UsbHAL> HubDriver<H> {
             }
         }))
     }
-
+    
     fn interrupt_on_port_change(this: Arc<Self>, index: u8) {
         H::queue_task_fn(move || {
             match Self::fetch_port_status(&this.device, index) {
@@ -179,7 +179,7 @@ impl<H: UsbHAL> HubDriver<H> {
         H::sleep(Duration::from_millis(hub_descriptor.bPwrOn2PwrGood as u64 * 2));
 
         Self::clear_feature(&self.device, port, FEATURE_C_PORT_CONNECTION)?;
-        let mut status = Self::fetch_port_status(&self.device, port)?;
+        let status = Self::fetch_port_status(&self.device, port)?;
 
         debug!("Port {}: status={:?}", port, status);
 

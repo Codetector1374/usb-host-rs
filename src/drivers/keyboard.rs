@@ -11,8 +11,7 @@ use crate::consts::*;
 use crate::descriptor::{USBInterfaceDescriptor, USBInterfaceDescriptorSet};
 use crate::items::{ControlCommand, EndpointType, TransferBuffer};
 use crate::structs::{USBDevice, USBDeviceDriver, USBPipe, DeviceState};
-use core::ops::Index;
-use downcast_rs::__std::ops::IndexMut;
+use core::ops::{Index, IndexMut};
 
 struct KeyState {
     data: [u8; 32],
@@ -137,7 +136,7 @@ impl<H: UsbHAL, C: HIDKeyboardCallback> HIDKeyboard<H, C> {
 
         let driver = Arc::downgrade(&driver);
 
-        crate::layer::pipe_async_listener(pipe.clone(), 20, 8, Arc::new(move |buf, res| {
+        crate::layer::pipe_async_listener(pipe.clone(), 20, 8, Arc::new(move |buf, _| {
             if let Some(arc_driver) = driver.upgrade() {
                 let mut state = arc_driver.key_state.lock();
                 let mut new_keys = [0u8; 8];
@@ -161,7 +160,7 @@ impl<H: UsbHAL, C: HIDKeyboardCallback> HIDKeyboard<H, C> {
                     }
                 }
             }
-        }));
+        }))?;
 
         // for _ in 0..20 {
         //     let cloned = pipe.clone();

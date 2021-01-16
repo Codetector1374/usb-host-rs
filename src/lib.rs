@@ -87,7 +87,7 @@ pub trait UsbHAL: Sync + Send + 'static {
 }
 
 pub trait HostCallbacks<H: UsbHAL>: Sync + Send {
-    fn new_device(&self, host: &Arc<USBHost<H>>, device: &Arc<RwLock<USBDevice>>) -> USBResult<()> {
+    fn new_device(&self, _host: &Arc<USBHost<H>>, _device: &Arc<RwLock<USBDevice>>) -> USBResult<()> {
         Ok(())
     }
 }
@@ -112,7 +112,7 @@ impl<H: UsbHAL> USBHost<H> {
     }
 
     pub fn attach_root_hub(&self, controller: Arc<dyn USBHostController>, speed: USBSpeed) -> Arc<RwLock<USBDevice>> {
-        let mut bus = Arc::new(USBBus::new(controller.clone()));
+        let bus = Arc::new(USBBus::new(controller.clone()));
         let device = Self::new_device(None, bus.clone(), speed, 0, 1)
             .unwrap_or_else(|e| panic!("Error: {:?}", e));
         controller.register_root_hub(&device);
@@ -126,7 +126,9 @@ impl<H: UsbHAL> USBHost<H> {
         }
 
         // open the control "endpoint" on the root hub.
-        controller.pipe_open(&device, None);
+        if let Err(e) = controller.pipe_open(&device, None) {
+            error!("failed to open control endpoint on root: {:?}", e);
+        }
 
         device
     }
@@ -152,7 +154,7 @@ impl<H: UsbHAL> USBHost<H> {
             }
         };
 
-        let mut dev = USBDevice::new(parent.clone(), bus.clone(), max_packet_size, addr, port, speed, depth); // No Addr Yet
+        let dev = USBDevice::new(parent.clone(), bus.clone(), max_packet_size, addr, port, speed, depth); // No Addr Yet
 
         // Setup Default EP Descriptor (This is faked so SW stack is unified)
 
@@ -197,11 +199,11 @@ impl<H: UsbHAL> USBHost<H> {
 
     pub fn fetch_configuration_descriptor(device: &Arc<RwLock<USBDevice>>) -> Result<USBConfigurationDescriptorSet, USBError> {
         let mut config_descriptor = USBConfigurationDescriptor::default();
-        Self::fetch_descriptor_slice(device, RequestType::Standard, DESCRIPTOR_TYPE_CONFIGURATION, 0, 0, &mut as_mut_slice(&mut config_descriptor)[..4]);
+        Self::fetch_descriptor_slice(device, RequestType::Standard, DESCRIPTOR_TYPE_CONFIGURATION, 0, 0, &mut as_mut_slice(&mut config_descriptor)[..4])?;
 
         let mut descriptor_buf: Vec<u8> = Vec::new();
         descriptor_buf.resize(config_descriptor.wTotalLength as usize, 0);
-        Self::fetch_descriptor_slice(device, RequestType::Standard, DESCRIPTOR_TYPE_CONFIGURATION, 0, 0, descriptor_buf.as_mut_slice());
+        Self::fetch_descriptor_slice(device, RequestType::Standard, DESCRIPTOR_TYPE_CONFIGURATION, 0, 0, descriptor_buf.as_mut_slice())?;
 
         as_mut_slice(&mut config_descriptor).copy_from_slice(&descriptor_buf[..core::mem::size_of::<USBConfigurationDescriptor>()]);
 
@@ -264,13 +266,13 @@ impl<H: UsbHAL> USBHost<H> {
         }
 
         let mut buf = [0u8; 1];
-        Self::fetch_descriptor_slice(device, RequestType::Standard, DESCRIPTOR_TYPE_STRING, index, lang, &mut buf);
+        Self::fetch_descriptor_slice(device, RequestType::Standard, DESCRIPTOR_TYPE_STRING, index, lang, &mut buf)?;
         if buf[0] == 0 {
             return USBErrorKind::InvalidDescriptor.err("descriptor not available")
         }
         let mut buf2: Vec<u8> = Vec::new();
         buf2.resize(buf[0] as usize, 0);
-        Self::fetch_descriptor_slice(device, RequestType::Standard, DESCRIPTOR_TYPE_STRING, index, lang, &mut buf2);
+        Self::fetch_descriptor_slice(device, RequestType::Standard, DESCRIPTOR_TYPE_STRING, index, lang, &mut buf2)?;
         if buf2[1] != DESCRIPTOR_TYPE_STRING {
             return Err(USBErrorKind::InvalidDescriptor.msg("got wrong descriptor type value"))
         }
@@ -281,7 +283,7 @@ impl<H: UsbHAL> USBHost<H> {
 
     pub fn setup_new_device(host: &Arc<Self>, device: Arc<RwLock<USBDevice>>) -> USBResult<()> {
         let mut device_desc = USBDeviceDescriptor::default();
-        Self::fetch_descriptor(&device, RequestType::Standard, DESCRIPTOR_TYPE_DEVICE, 0, 0, &mut device_desc);
+        Self::fetch_descriptor(&device, RequestType::Standard, DESCRIPTOR_TYPE_DEVICE, 0, 0, &mut device_desc)?;
 
         trace!("got device descriptor: {:?}", device_desc);
 
@@ -301,7 +303,7 @@ impl<H: UsbHAL> USBHost<H> {
             index: 0,
             length: 0,
             buffer: TransferBuffer::None,
-        });
+        })?;
 
         trace!("Applied Config {}", configuration.config.bConfigurationValue);
 
@@ -312,7 +314,7 @@ impl<H: UsbHAL> USBHost<H> {
             dev_lock.bus.devices.set(dev_lock.addr as usize, Some(dev_cloned_weak));
         }
 
-        host.callbacks.new_device(host, &device);
+        host.callbacks.new_device(host, &device)?;
 
         Ok(())
     }
