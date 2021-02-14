@@ -1,5 +1,4 @@
 #![feature(allocator_api)]
-#![feature(const_in_array_repeat_expressions)]
 #![feature(global_asm)]
 #![feature(llvm_asm)]
 #![allow(dead_code, unused_imports, unused_parens)]
